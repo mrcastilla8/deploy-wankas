@@ -132,6 +132,18 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       localStorage.removeItem('wankas-user');
       clientCache.invalidateAll();
 
+      // Manually clear Supabase localStorage keys to guarantee next page load starts clean
+      if (typeof window !== 'undefined') {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
+            keysToRemove.push(key);
+          }
+        }
+        keysToRemove.forEach(key => localStorage.removeItem(key));
+      }
+
       if (typeof window !== 'undefined') {
         window.location.href = '/login'; 
       }
