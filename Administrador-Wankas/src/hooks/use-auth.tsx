@@ -136,14 +136,15 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, [supabase, router]);
 
   const logout = useCallback(async () => {
-    setUser(null);
-    localStorage.removeItem(USER_STORAGE_KEY);
-    
-    supabase.auth.signOut().catch((error) => {
-      console.warn("Supabase signOut error in background:", error);
-    });
-
-    router.replace('/');
+    try {
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.warn("Supabase signOut error:", error);
+    } finally {
+      setUser(null);
+      localStorage.removeItem(USER_STORAGE_KEY);
+      router.replace('/');
+    }
   }, [supabase, router]);
   
   return (

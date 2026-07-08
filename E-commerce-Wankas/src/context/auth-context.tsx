@@ -121,17 +121,20 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const logout = async () => {
-    setUser(null);
-    localStorage.removeItem('wankas-user');
+    try {
+      if (supabase) {
+        await supabase.auth.signOut();
+      }
+    } catch (error) {
+      console.warn("Error al cerrar sesión en Supabase:", error);
+    } finally {
+      setUser(null);
+      localStorage.removeItem('wankas-user');
+      clientCache.invalidateAll();
 
-    if (supabase) {
-      supabase.auth.signOut().catch((error) => {
-        console.warn("Supabase signOut error in background:", error);
-      });
-    }
-
-    if (typeof window !== 'undefined') {
-      window.location.href = '/login'; 
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login'; 
+      }
     }
   };
 
