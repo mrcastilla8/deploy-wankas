@@ -83,30 +83,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           setIsLoading(false);
           return;
         }
-
-        // 2. No local session — try shared Redis/file SSO session from Admin
-        try {
-          const res = await fetch('/api/auth/session');
-          const data = await res.json();
-          if (data.session?.access_token) {
-            const { data: setData, error: setError } = await supabase.auth.setSession({
-              access_token: data.session.access_token,
-              refresh_token: data.session.refresh_token,
-            });
-            if (!setError && setData.user) {
-              const completeUser = await buildUser(setData.user);
-              setUser(completeUser);
-              localStorage.setItem('wankas-user', JSON.stringify(completeUser));
-              setIsLoading(false);
-              return;
-            }
-          }
-        } catch (ssoError) {
-          // SSO fetch failed — non-critical, continue as logged out
-          console.warn('SSO session fetch failed:', ssoError);
-        }
-
-        // 3. No session found anywhere
+        // 2. No session found
         setUser(null);
         localStorage.removeItem('wankas-user');
       } catch (error) {
@@ -144,8 +121,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const logout = async () => {
-    // Fire-and-forget: clear shared SSO session
-    fetch('/api/auth/session', { method: 'DELETE' }).catch(console.error);
     if (supabase) {
       await supabase.auth.signOut();
     }

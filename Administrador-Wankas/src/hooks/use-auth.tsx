@@ -121,15 +121,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUser(userProfile);
       localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userProfile));
 
-      // Fire-and-forget: save session to shared Redis/file store for SSO
-      const { data: { session: activeSession } } = await supabase.auth.getSession();
-      if (activeSession) {
-        fetch('/api/auth/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session: activeSession }),
-        }).catch(console.error);
-      }
+
 
       if (userProfile.role === 'worker') {
         router.replace('/seleccionar-sede');
@@ -144,8 +136,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, [supabase, router]);
 
   const logout = useCallback(async () => {
-    // Fire-and-forget: clear shared Redis/file session
-    fetch('/api/auth/session', { method: 'DELETE' }).catch(console.error);
     await supabase.auth.signOut();
     setUser(null);
     localStorage.removeItem(USER_STORAGE_KEY);

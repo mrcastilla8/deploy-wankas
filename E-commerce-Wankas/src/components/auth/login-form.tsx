@@ -66,15 +66,6 @@ export function LoginForm() {
                 variant: 'destructive',
             });
         } else if (data.user) {
-            if (data.session) {
-                // Sincronizar sesión con cookies del servidor de forma inmediata
-                await fetch('/api/auth/session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session: data.session }),
-                }).catch(console.error);
-            }
-
             toast({ title: translations.loginForm.loginSuccess, description: translations.loginForm.welcomeBack });
             const redirectUrl = searchParams.get('redirect') || '/profile';
             router.push(redirectUrl);
