@@ -156,7 +156,10 @@ export function RegisterForm() {
           <p className="text-xs text-muted-foreground text-center">
             ¿Eres parte del equipo Wanka's?{' '}
             <Button variant="link" asChild className="p-0 h-auto text-primary font-medium text-xs">
-              <a href={process.env.NEXT_PUBLIC_ADMIN_URL || "http://localhost:9002"}>
+              <a href={(() => {
+                const url = process.env.NEXT_PUBLIC_ADMIN_URL || "http://localhost:9002";
+                return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/') ? url : `https://${url}`;
+              })()}>
                 Inicia sesión en el Portal del Staff →
               </a>
             </Button>

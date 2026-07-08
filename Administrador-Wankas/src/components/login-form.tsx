@@ -103,7 +103,10 @@ export default function LoginForm() {
           <p className="text-sm text-muted-foreground text-center">
             ¿Buscas comprar nuestros productos?{' '}
             <a 
-              href={process.env.NEXT_PUBLIC_ECOMMERCE_URL || 'http://localhost:9000'}
+              href={(() => {
+                const url = process.env.NEXT_PUBLIC_ECOMMERCE_URL || 'http://localhost:9000';
+                return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/') ? url : `https://${url}`;
+              })()}
               className="hover:underline font-medium block mt-1"
               style={{ color: 'hsl(var(--accent))' }}
             >

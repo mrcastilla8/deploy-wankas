@@ -85,7 +85,10 @@ export function Header() {
           {renderNavLinks(userNav)}
           {user && (user.role === 'admin' || user.role === 'worker') && (
             <a
-              href={process.env.NEXT_PUBLIC_ADMIN_URL || 'http://localhost:9002'}
+              href={(() => {
+                const url = process.env.NEXT_PUBLIC_ADMIN_URL || 'http://localhost:9002';
+                return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/') ? url : `https://${url}`;
+              })()}
               className="flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary text-foreground/80"
             >
               <ShieldAlert className="h-4 w-4 text-primary" />
@@ -161,7 +164,10 @@ export function Header() {
                 {user && (user.role === 'admin' || user.role === 'worker') && (
                   <SheetClose asChild>
                     <a
-                      href={process.env.NEXT_PUBLIC_ADMIN_URL || 'http://localhost:9002'}
+                      href={(() => {
+                        const url = process.env.NEXT_PUBLIC_ADMIN_URL || 'http://localhost:9002';
+                        return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/') ? url : `https://${url}`;
+                      })()}
                       className="flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary text-foreground/80 justify-start py-2"
                     >
                       <ShieldAlert className="h-4 w-4 text-primary" />

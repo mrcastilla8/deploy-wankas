@@ -1,6 +1,6 @@
 'use client';
 
-import type { StoreLocation } from '@/types';
+import type { StoreLocation, TimeSlot } from '@/types';
 import { useState, useEffect, useMemo } from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -60,7 +60,7 @@ export function StoreSelector({
     fetchTimeSlots();
   }, []);
   
-  const displayConfig = useMemo(() => {
+  const displayConfig = useMemo<{ slots: (TimeSlot & { isDisabled?: boolean })[]; message: string; baseDate: Date }>(() => {
     if (isLoadingTimeSlots) {
       return { slots: [], message: '', baseDate: new Date() };
     }
@@ -83,7 +83,7 @@ export function StoreSelector({
     
     let baseDate = new Date(now);
     let message = '';
-    let slotsToDisplay = [...allTimeSlots];
+    let slotsToDisplay: (TimeSlot & { isDisabled?: boolean })[] = [...allTimeSlots];
 
     if (todaysFutureSlots.length > 0) {
       slotsToDisplay = slotsToDisplay.map(slot => ({
