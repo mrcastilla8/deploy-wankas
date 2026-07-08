@@ -121,18 +121,17 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const logout = async () => {
-    try {
-      if (supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch (error) {
-      console.warn("Supabase signOut error, proceeding with local logout:", error);
-    } finally {
-      setUser(null);
-      localStorage.removeItem('wankas-user');
-      if (typeof window !== 'undefined') {
-        window.location.href = '/login'; 
-      }
+    setUser(null);
+    localStorage.removeItem('wankas-user');
+
+    if (supabase) {
+      supabase.auth.signOut().catch((error) => {
+        console.warn("Supabase signOut error in background:", error);
+      });
+    }
+
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login'; 
     }
   };
 
