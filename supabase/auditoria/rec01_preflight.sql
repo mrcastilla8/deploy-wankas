@@ -14,7 +14,7 @@ join pg_attribute as a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdro
 left join pg_attrdef as d on d.adrelid = c.oid and d.adnum = a.attnum
 where (n.nspname = 'public' and c.relname in (
   'profiles', 'products', 'categories', 'locations', 'orders', 'order_items'
-)) or (n.nspname = 'auth' and c.relname = 'users' and a.attname in ('id', 'email', 'raw_user_meta_data'))
+)) or (n.nspname = 'auth' and c.relname = 'users' and a.attname in ('id', 'email', 'phone', 'raw_user_meta_data'))
 order by n.nspname, c.relname, a.attnum;
 
 select conrelid::regclass as source_table, conname, convalidated,
@@ -87,6 +87,24 @@ join pg_namespace as n on n.oid = p.pronamespace
 where n.nspname = 'public' and p.prokind = 'f'
 order by p.proname, p.oid;
 
+with legacy as (
+  select oid, proname from pg_proc
+  where pronamespace = 'public'::regnamespace and prokind = 'f' and pronargs = 0
+    and proname in ('handle_new_user', 'is_admin', 'is_admin_or_worker')
+)
+select l.oid::regprocedure as legacy_function, 'catalog' as source,
+       pg_describe_object(d.classid, d.objid, d.objsubid) as consumer
+from legacy as l
+join pg_depend as d on d.refclassid = 'pg_proc'::regclass and d.refobjid = l.oid
+where not (d.classid = 'pg_proc'::regclass and d.objid = l.oid)
+union all
+select l.oid::regprocedure, 'routine source', p.oid::regprocedure::text
+from legacy as l
+join pg_proc as p on p.oid <> l.oid and p.prosrc ~* ('[[:<:]]' || l.proname || '[[:>:]]')
+join pg_namespace as n on n.oid = p.pronamespace
+where n.nspname not in ('pg_catalog', 'information_schema')
+order by 1, 2, 3;
+
 select distinct view_schema, view_name, table_name
 from information_schema.view_table_usage
 where table_schema = 'public'
@@ -99,6 +117,9 @@ group by role
 order by role;
 
 select
+  (select count(*) from public.profiles) as profile_count,
+  (select count(*) from public.orders) as order_count,
+  (select count(*) from public.order_items) as order_item_count,
   (select count(*) from public.profiles p left join auth.users u on p.id = u.id where u.id is null)
     as profiles_without_auth,
   (select count(*) from auth.users u left join public.profiles p on u.id = p.id where p.id is null)
@@ -106,6 +127,14 @@ select
   (select count(*) from auth.users u join public.profiles p on u.email = p.email where u.id <> p.id)
     as emails_linked_to_different_uuid,
   (select count(*) from public.orders where user_id is null) as orders_without_customer,
-  (select count(*) from public.orders where location_id is null) as orders_without_location;
+  (select count(*) from public.orders where location_id is null) as orders_without_location,
+  (select count(*) from public.orders o left join public.profiles p on p.id = o.user_id
+   where o.user_id is not null and p.id is null) as orders_with_missing_profile,
+  (select count(*) from public.orders o left join public.locations l on l.id = o.location_id
+   where o.location_id is not null and l.id is null) as orders_with_missing_location,
+  (select count(*) from public.order_items i left join public.orders o on o.id = i.order_id
+   where o.id is null) as lines_without_order,
+  (select count(*) from public.order_items i left join public.products p on p.id = i.product_id
+   where p.id is null) as lines_without_product;
 
 rollback;

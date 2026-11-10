@@ -15,22 +15,28 @@ exception
 end;
 $$;
 
-insert into auth.users (id, email, raw_user_meta_data)
-values ('00000000-0000-0000-0000-000000000006', 'registro@example.test',
-        '{"name":"Registro","role":"admin","location_id":"30000000-0000-0000-0000-000000000001"}');
+insert into auth.users (id, email, phone, raw_user_meta_data)
+values ('00000000-0000-0000-0000-000000000006', 'registro@example.test', '555-0106',
+        '{"name":"Registro","phone_number":"555-0999","role":"admin","location_id":"30000000-0000-0000-0000-000000000001"}');
 
 do $$
 begin
-  assert (select count(*) from public.profiles join auth.users using (id)) = 6;
-  assert (select count(*) from public.profiles where role = 'customer' and location_id is null) = 4;
+  assert (select count(*) from public.profiles join auth.users using (id)) = 33;
+  assert (select count(*) from public.profiles where role = 'customer' and location_id is null) = 27;
+  assert (select count(*) from public.profiles where role = 'admin') = 3;
+  assert (select count(*) from public.profiles where role = 'worker') = 3;
+  assert (select role from public.profiles where id = '00000000-0000-0000-0000-000000000003') = 'worker';
+  assert (select role from public.profiles where id = '00000000-0000-0000-0000-000000000004') = 'admin';
   assert exists (
     select 1 from public.profiles
-    where id = '00000000-0000-0000-0000-000000000005' and name = 'Recuperado'
+    where id = '00000000-0000-0000-0000-000000000005'
+      and name = 'Recuperado' and email = 'sinperfil@example.test' and phone_number = '555-0105'
   );
   assert exists (
     select 1 from public.profiles
     where id = '00000000-0000-0000-0000-000000000006'
-      and name = 'Registro' and email = 'registro@example.test'
+      and name = 'Registro' and email = 'registro@example.test' and phone_number = '555-0106'
+      and role = 'customer' and location_id is null
   );
   assert (select password_hash from public.profiles
     where id = '00000000-0000-0000-0000-000000000001') = 'dato-sintetico';
@@ -50,8 +56,14 @@ select public.rec01_assert_error('select internal_note from public.products', '4
 select public.rec01_assert_error('select id from public.profiles', '42501');
 select public.rec01_assert_error('select id from public.orders', '42501');
 select public.rec01_assert_error('select order_id from public.order_items', '42501');
+select public.rec01_assert_error('select public.handle_new_user()', '42501');
+select public.rec01_assert_error('select public.is_admin()', '42501');
+select public.rec01_assert_error('select public.is_admin_or_worker()', '42501');
 
 set local role authenticated;
+select public.rec01_assert_error('select public.handle_new_user()', '42501');
+select public.rec01_assert_error('select public.is_admin()', '42501');
+select public.rec01_assert_error('select public.is_admin_or_worker()', '42501');
 do $$
 begin
   assert (select count(id) from public.profiles) = 0;
@@ -116,6 +128,12 @@ $$;
 select public.rec01_assert_error('update public.products set price = 12', '42501');
 
 set local role service_role;
+do $$
+begin
+  assert public.is_admin();
+  assert public.is_admin_or_worker();
+end;
+$$;
 update public.profiles set role = 'worker'
 where id = '00000000-0000-0000-0000-000000000006';
 update public.profiles set location_id = '30000000-0000-0000-0000-000000000001'
@@ -151,7 +169,8 @@ $$;
 select public.rec01_assert_error($sql$update public.orders set status = 'completed'$sql$, '42501');
 
 set local role service_role;
-update public.profiles set location_id = '30000000-0000-0000-0000-000000000003' where role = 'worker';
+update public.profiles set location_id = '30000000-0000-0000-0000-000000000003'
+where id = '00000000-0000-0000-0000-000000000003';
 set local role authenticated;
 do $$
 begin

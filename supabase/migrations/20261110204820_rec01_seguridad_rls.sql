@@ -100,4 +100,57 @@ create policy order_items_read_visible_order on public.order_items for select to
     select 1 from public.orders where orders.id = order_items.order_id
   ));
 
+-- Revisar dependencias tras sustituir las políticas y el trigger de REC-01.
+-- Conservar las funciones y los grants de roles de servidor.
+do $$
+declare
+  legacy record;
+  dependent_object text;
+begin
+  for legacy in
+    select p.oid, p.proname, p.proowner
+    from pg_proc as p
+    where p.pronamespace = 'public'::regnamespace
+      and p.prokind = 'f' and p.pronargs = 0
+      and p.proname in ('handle_new_user', 'is_admin', 'is_admin_or_worker')
+  loop
+    select pg_describe_object(d.classid, d.objid, d.objsubid)
+    into dependent_object
+    from pg_depend as d
+    where d.refclassid = 'pg_proc'::regclass and d.refobjid = legacy.oid
+      and not (d.classid = 'pg_proc'::regclass and d.objid = legacy.oid)
+    limit 1;
+
+    if dependent_object is null then
+      -- PostgreSQL no registra las llamadas en cuerpos SQL/PLpgSQL escritos como texto.
+      select p.oid::regprocedure::text
+      into dependent_object
+      from pg_proc as p
+      join pg_namespace as n on n.oid = p.pronamespace
+      where n.nspname not in ('pg_catalog', 'information_schema')
+        and p.oid <> legacy.oid
+        and p.prosrc ~* ('[[:<:]]' || legacy.proname || '[[:>:]]')
+        and not (
+          n.nspname = 'public' and p.prokind = 'f' and p.pronargs = 0
+          and p.proname in ('handle_new_user', 'is_admin', 'is_admin_or_worker')
+          and p.prosecdef and p.proowner = legacy.proowner
+        )
+      limit 1;
+    end if;
+
+    if dependent_object is not null then
+      raise exception 'REC-01: dependencia vigente de %: %', legacy.oid::regprocedure, dependent_object
+        using hint = 'Revisar el consumidor y sus permisos antes de retirar EXECUTE.';
+    end if;
+
+    execute format('revoke execute on function public.%I() from public, anon, authenticated', legacy.proname);
+    if has_function_privilege('anon', legacy.oid, 'execute')
+       or has_function_privilege('authenticated', legacy.oid, 'execute') then
+      raise exception 'REC-01: EXECUTE efectivo persiste para %', legacy.oid::regprocedure
+        using hint = 'Revisar membresías y grants heredados antes de reintentar.';
+    end if;
+  end loop;
+end;
+$$;
+
 commit;

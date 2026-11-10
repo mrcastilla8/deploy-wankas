@@ -57,8 +57,10 @@ declare
   assigned_role text;
   assigned_location uuid;
 begin
-  insert into public.profiles (id, email, name, role, location_id)
-  values (new.id, new.email, new.raw_user_meta_data ->> 'name', 'customer', null)
+  insert into public.profiles (id, email, name, phone_number, role, location_id)
+  values (new.id, new.email, new.raw_user_meta_data ->> 'name',
+          coalesce(nullif(new.phone, ''), nullif(new.raw_user_meta_data ->> 'phone_number', '')),
+          'customer', null)
   returning id, role, location_id into created_id, assigned_role, assigned_location;
 
   if created_id is distinct from new.id
@@ -80,8 +82,10 @@ after insert on auth.users
 for each row execute function wankas_internal.rec01_create_customer_profile();
 
 -- Solo recuperar perfiles ausentes, sin sobrescribir roles ni datos existentes.
-insert into public.profiles (id, email, name, role, location_id)
-select auth_user.id, auth_user.email, auth_user.raw_user_meta_data ->> 'name', 'customer', null
+insert into public.profiles (id, email, name, phone_number, role, location_id)
+select auth_user.id, auth_user.email, auth_user.raw_user_meta_data ->> 'name',
+       coalesce(nullif(auth_user.phone, ''), nullif(auth_user.raw_user_meta_data ->> 'phone_number', '')),
+       'customer', null
 from auth.users as auth_user
 where not exists (
   select 1 from public.profiles as profile where profile.id = auth_user.id
