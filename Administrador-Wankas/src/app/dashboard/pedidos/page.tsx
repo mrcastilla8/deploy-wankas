@@ -5,7 +5,7 @@ import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
 import type { Order, OrderStatus, Location } from "@/types"
 import { orderStatusToSpanish, spanishToOrderStatus } from "@/types"
-import { createClient } from "@/lib/supabase/client"
+import { adminFetch } from "@/lib/adminFetch"
 import { adminCache } from "@/lib/adminCache"
 import { Loader } from "@/components/ui/loader"
 import { format, parseISO } from "date-fns"
@@ -65,13 +65,39 @@ export default function PedidosPage() {
   const [locationFilter, setLocationFilter] = React.useState<string>("all")
   const [searchTerm, setSearchTerm] = React.useState("")
   const [dateFilter, setDateFilter] = React.useState<Date | undefined>()
-
-  const supabase = createClient()
+  const [updatingOrderId, setUpdatingOrderId] = React.useState<string | null>(null)
 
   const statuses: string[] = ["Todos", "Pendiente", "Completado", "Cancelado"]
 
+  const getCacheKey = React.useCallback(
+    () => `pedidos:${user?.role}:${user?.location_id ?? 'all'}`,
+    [user?.role, user?.location_id]
+  )
+
+  const handleAuthError = React.useCallback((status: number) => {
+    if (status === 401) {
+      toast({
+        variant: "destructive",
+        title: "Sesión no válida",
+        description: "Vuelve a iniciar sesión para continuar.",
+      })
+      return true
+    }
+
+    if (status === 403) {
+      toast({
+        variant: "destructive",
+        title: "Sin permiso",
+        description: "No tienes autorización para ver o modificar estos pedidos.",
+      })
+      return true
+    }
+
+    return false
+  }, [toast])
+
   const fetchData = React.useCallback(async (forceRefresh = false) => {
-    const cacheKey = `pedidos:${user?.role}:${user?.location_id ?? 'all'}`
+    const cacheKey = getCacheKey()
 
     if (!forceRefresh) {
       const cachedOrders = adminCache.get<Order[]>(cacheKey)
@@ -86,11 +112,16 @@ export default function PedidosPage() {
 
     setLoading(true)
     try {
-      const params = new URLSearchParams({ role: user?.role ?? '' })
-      if (user?.role === 'worker' && user.location_id) {
-        params.set('location_id', user.location_id)
+      const res = await adminFetch('/api/admin/pedidos')
+
+      if (handleAuthError(res.status)) {
+        return
       }
-      const res = await fetch(`/api/admin/pedidos?${params}`)
+
+      if (!res.ok) {
+        throw new Error(`No se pudieron cargar los pedidos (HTTP ${res.status}).`)
+      }
+
       const ordersData = await res.json()
       adminCache.set(cacheKey, ordersData)
       setOrders(ordersData)
@@ -100,19 +131,32 @@ export default function PedidosPage() {
         if (cachedLocs) {
           setLocations(cachedLocs)
         } else {
-          const locRes = await fetch('/api/admin/ubicaciones')
+          const locRes = await adminFetch('/api/admin/ubicaciones')
+
+          if (handleAuthError(locRes.status)) {
+            return
+          }
+
+          if (!locRes.ok) {
+            throw new Error(`No se pudieron cargar las ubicaciones (HTTP ${locRes.status}).`)
+          }
+
           const locsData = await locRes.json()
           adminCache.set('ubicaciones', locsData)
           setLocations(locsData)
         }
       }
     } catch (e) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudieron cargar los pedidos."})
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: e instanceof Error ? e.message : "No se pudieron cargar los pedidos.",
+      })
       console.error("Error fetching orders:", e)
     } finally {
       setLoading(false)
     }
-  }, [user?.role, user?.location_id, toast])
+  }, [getCacheKey, handleAuthError, toast, user?.role])
 
   React.useEffect(() => {
     fetchData()
@@ -141,7 +185,12 @@ export default function PedidosPage() {
     }
     
     if (dateFilter) {
-      tempOrders = tempOrders.filter(order => format(parseISO(order.created_at), 'yyyy-MM-dd') === format(dateFilter, 'yyyy-MM-dd'))
+      tempOrders = tempOrders.filter(order => {
+        if (!order.created_at) return false
+        const createdAt = parseISO(order.created_at)
+        if (Number.isNaN(createdAt.getTime())) return false
+        return format(createdAt, 'yyyy-MM-dd') === format(dateFilter, 'yyyy-MM-dd')
+      })
     }
 
     return tempOrders
@@ -151,69 +200,80 @@ export default function PedidosPage() {
     const newStatus = spanishToOrderStatus(newStatusSpanish);
     const oldStatus = order.status as OrderStatus;
 
-    if (!newStatus || !order.order_items || newStatus === oldStatus) {
+    if (!newStatus || newStatus === oldStatus) {
+      return;
+    }
+
+    if (oldStatus !== 'pending') {
+      toast({
+        variant: "destructive",
+        title: "Acción no permitida",
+        description: "Solo los pedidos pendientes pueden cambiar de estado.",
+      });
+      return;
+    }
+
+    if (updatingOrderId) {
+      return;
+    }
+
+    setUpdatingOrderId(order.id);
+
+    try {
+      const res = await adminFetch('/api/admin/pedidos', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_id: order.id,
+          new_status: newStatus,
+        }),
+      });
+
+      if (handleAuthError(res.status)) {
         return;
-    }
+      }
 
-    let stockChange = 0;
-    if (newStatus === 'completed' && oldStatus !== 'completed') {
-        stockChange = -1; 
-    } else if (oldStatus === 'completed' && newStatus !== 'completed') {
-        stockChange = 1; 
-    }
-
-    if (stockChange !== 0) {
-        const productIds = order.order_items.map(item => item.product_id);
-        const { data: products, error: productsError } = await supabase
-            .from('products')
-            .select('id, stock')
-            .in('id', productIds);
-
-        if (productsError) {
-            toast({ variant: "destructive", title: "Error", description: "No se pudo obtener el stock para la actualización." });
-            return;
-        }
-
-        const productStockMap = new Map(products.map(p => [p.id, p.stock]));
-        
-        const stockUpdatePromises = order.order_items.map(item => {
-            const currentStock = productStockMap.get(item.product_id) ?? 0;
-            const newStock = currentStock + (item.quantity * stockChange);
-            return supabase.from('products').update({ stock: newStock }).eq('id', item.product_id);
+      if (res.status === 409) {
+        toast({
+          variant: "destructive",
+          title: "Pedido desactualizado",
+          description: "El pedido ya no permite esa transición. Se recargará la lista.",
         });
+        adminCache.invalidate(getCacheKey());
+        await fetchData(true);
+        return;
+      }
 
-        const results = await Promise.all(stockUpdatePromises);
-        if (results.some(res => res.error)) {
-            const action = stockChange === -1 ? "descontar" : "devolver";
-            toast({ variant: "destructive", title: "Error", description: `Fallo al ${action} el stock para todos los productos.` });
-            return; 
+      if (!res.ok) {
+        let message = `No se pudo actualizar el pedido (HTTP ${res.status}).`;
+
+        try {
+          const payload = await res.json();
+          if (payload?.error) message = payload.error;
+        } catch {
+          // La respuesta de error no traía JSON.
         }
 
-        const { error: updateOrderStatusError } = await supabase
-            .from('orders')
-            .update({ status: newStatus })
-            .eq('id', order.id);
+        throw new Error(message);
+      }
 
-        if (updateOrderStatusError) {
-            toast({ variant: "destructive", title: "Error de Sincronización", description: "Se ajustó el stock, pero no se pudo actualizar el estado del pedido. Contacte a soporte." });
-            console.error('Error updating order status:', updateOrderStatusError);
-        } else {
-            toast({ title: "Éxito", description: "Estado del pedido y stock actualizados correctamente." });
-            fetchData();
-        }
-    } else {
-        const { error } = await supabase
-            .from('orders')
-            .update({ status: newStatus })
-            .eq('id', order.id)
-
-        if (error) {
-            toast({ variant: "destructive", title: "Error", description: "No se pudo actualizar el estado del pedido."})
-            console.error('Error updating order status:', error)
-        } else {
-            toast({ title: "Éxito", description: "Estado del pedido actualizado."})
-            fetchData()
-        }
+      adminCache.invalidate(getCacheKey());
+      toast({
+        title: "Éxito",
+        description: newStatus === 'completed'
+          ? "Pedido completado. El stock ya estaba reservado."
+          : "Pedido cancelado y stock devuelto.",
+      });
+      await fetchData(true);
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: e instanceof Error ? e.message : "No se pudo actualizar el pedido.",
+      });
+      console.error('Error updating order status:', e);
+    } finally {
+      setUpdatingOrderId(null);
     }
   };
 
@@ -359,22 +419,37 @@ export default function PedidosPage() {
                       <TableCell>
                         <Badge className={`${getStatusColor(order.status as OrderStatus)} text-white`}>{orderStatusToSpanish[order.status as OrderStatus] || order.status}</Badge>
                       </TableCell>
-                      <TableCell className="text-right">S/ {order.total_price.toFixed(2)}</TableCell>
+                      <TableCell className="text-right">S/ {Number(order.total_price ?? 0).toFixed(2)}</TableCell>
                       <TableCell>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button aria-haspopup="true" size="icon" variant="ghost">
+                            <Button
+                              aria-haspopup="true"
+                              size="icon"
+                              variant="ghost"
+                              disabled={updatingOrderId === order.id}
+                            >
                               <MoreHorizontal className="h-4 w-4" />
                               <span className="sr-only">Toggle menu</span>
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuLabel>Acciones</DropdownMenuLabel>
-                            {statuses.slice(1).map(status => (
-                              <DropdownMenuItem key={status} onSelect={() => handleStatusChange(order, status)}>
-                                Marcar como {status}
+                            {order.status === 'pending' ? (
+                              ['Completado', 'Cancelado'].map(status => (
+                                <DropdownMenuItem
+                                  key={status}
+                                  disabled={updatingOrderId === order.id}
+                                  onSelect={() => handleStatusChange(order, status)}
+                                >
+                                  Marcar como {status}
+                                </DropdownMenuItem>
+                              ))
+                            ) : (
+                              <DropdownMenuItem disabled>
+                                Pedido finalizado
                               </DropdownMenuItem>
-                            ))}
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </TableCell>
