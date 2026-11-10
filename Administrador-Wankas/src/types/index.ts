@@ -17,8 +17,7 @@ export type Order = Database['public']['Tables']['orders']['Row'] & {
     order_items?: OrderItem[]; 
 };
 
-export type UserProfile = Database['public']['Tables']['profiles']['Row'] & {
-    location_id?: string | null;
+export type UserProfile = Omit<Database['public']['Tables']['profiles']['Row'], 'password_hash'> & {
     locationName?: string; 
 };
 

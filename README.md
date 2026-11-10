@@ -25,6 +25,8 @@ Antes de configurar el proyecto, asegúrate de tener instalado:
 
 ### Paso 1: Configurar la Base de Datos en Supabase
 
+El siguiente DDL describe el esquema histórico. Para revisar la recuperación del proyecto Wankas New y los requisitos previos de seguridad, consultar [REC-01](docs/rec01-seguridad-supabase.md).
+
 1. Ve a tu proyecto de Supabase y abre el **SQL Editor**.
 2. Copia y ejecuta la siguiente consulta DDL para crear las tablas necesarias en el esquema `public`:
 
