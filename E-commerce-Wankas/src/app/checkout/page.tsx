@@ -15,8 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import Link from 'next/link';
 import { useLocale } from '@/context/locale-context';
 import { timeSlots } from '@/data/stores'; 
-import { placeOrderWithStockUpdate } from '@/services/orderService';
-import type { Order } from '@/types';
+import { placeOrderAtomic } from '@/services/orderService';
 
 export default function CheckoutPage() {
   const { cartItems, getCartTotal, clearCart, getItemCount } = useCart();
@@ -93,6 +92,15 @@ export default function CheckoutPage() {
   const handlePlaceOrder = async () => {
     if (isSubmittingRef.current) return;
 
+    if (cartItems.some(item => !Number.isInteger(item.quantity) || item.quantity <= 0)) {
+      toast({
+        title: translations.common.error,
+        description: 'Las cantidades del carrito no son válidas. Actualiza el carrito e inténtalo de nuevo.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     if (!selectedStoreId || !selectedTimeSlotId || !pickupDate) {
       toast({
         title: translations.checkoutPage.missingInfoTitle,
@@ -116,28 +124,37 @@ export default function CheckoutPage() {
       return;
     }
 
+    if (new Date(finalPickupDateISO).getTime() <= Date.now()) {
+      toast({
+        title: translations.common.error,
+        description: 'La fecha y hora de recojo debe ser futura.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     isSubmittingRef.current = true;
     setIsProcessing(true);
 
     try {
-      const orderData: Omit<Order, 'id' | 'created_at' | 'updated_at' | 'order_date' | 'status'> = {
-          user_id: user.id,
-          location_id: selectedStoreId,
-          pickup_date: finalPickupDateISO,
-          total_price: total,
-          notes: notes.trim() || null,
-      };
+      const newOrder = await placeOrderAtomic({
+        locationId: selectedStoreId,
+        pickupDate: finalPickupDateISO,
+        notes: notes.trim() || null,
+        items: cartItems.map(item => ({
+          product_id: item.id,
+          quantity: item.quantity,
+        })),
+      });
 
-      const newOrder = await placeOrderWithStockUpdate(orderData, cartItems);
-
-      if (!newOrder || !newOrder.id) {
+      if (!newOrder?.order_id) {
         throw new Error(translations.checkoutPage.orderErrorFallback || "No se pudo obtener el ID del pedido.");
       }
 
       clearCart();
       toast({
         title: translations.checkoutPage.orderPlacedTitle,
-        description: translations.checkoutPage.orderPlacedDesc,
+        description: `${translations.checkoutPage.orderPlacedDesc} ${translations.common.total}: ${translations.common.currencySymbol}${newOrder.total_price.toFixed(2)}`,
         action: (
           <Button variant="outline" size="sm" onClick={() => router.push('/profile')}>
             {translations.buttons.viewOrders}

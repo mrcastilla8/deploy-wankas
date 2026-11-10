@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
-import type { Order, OrderItem, User, CartItem } from '@/types';
+import type { Order, OrderItem, CartItem } from '@/types';
 import { clientCache } from '@/lib/clientCache';
 
 export interface EnrichedOrderItem extends OrderItem {
@@ -13,124 +13,250 @@ export interface EnrichedOrder extends Order {
   location_address?: string;
 }
 
-export async function placeOrderWithStockUpdate(
-  orderData: Omit<Order, 'id' | 'created_at' | 'updated_at' | 'order_date' | 'status'>,
-  items: CartItem[]
-): Promise<Order> {
-  if (!supabase) {
-    throw new Error("El servicio de base de datos no está disponible.");
-  }
-
-  const productIds = items.map(item => item.id);
-  const { data: productsInStock, error: stockError } = await supabase
-    .from('products')
-    .select('id, stock, name_es')
-    .in('id', productIds);
-  
-  if (stockError) {
-    console.error("Error fetching stock:", stockError);
-    throw new Error("No se pudo verificar el stock de los productos.");
-  }
-
-  const stockMap = new Map(productsInStock.map(p => [p.id, { stock: p.stock, name: p.name_es }]));
-
-  for (const item of items) {
-    const productInfo = stockMap.get(item.id);
-    if (!productInfo || productInfo.stock < item.quantity) {
-      throw new Error(`No hay suficiente stock para '${productInfo?.name || item.name}'. Solo quedan ${productInfo?.stock || 0}.`);
-    }
-  }
-
-  const stockUpdatePromises = items.map(item => {
-    const productInfo = stockMap.get(item.id)!;
-    const newStock = productInfo.stock - item.quantity;
-    return supabase.from('products').update({ stock: newStock }).eq('id', item.id);
-  });
-  
-  const stockUpdateResults = await Promise.all(stockUpdatePromises);
-  const failedStockUpdate = stockUpdateResults.find(res => res.error);
-
-  if (failedStockUpdate) {
-    console.error('Failed to update stock, order not placed. Error:', failedStockUpdate.error);
-    throw new Error("No se pudo actualizar el stock de un producto. La orden no fue creada. Intente de nuevo.");
-  }
-  
-  const { data: newOrder, error: orderError } = await supabase
-    .from('orders')
-    .insert(orderData)
-    .select()
-    .single();
-
-  if (orderError || !newOrder) {
-    console.error('Order creation failed after stock update. Error:', orderError);
-    console.log('Attempting to revert stock updates...');
-    const stockRevertPromises = items.map(item => {
-        const productInfo = stockMap.get(item.id)!;
-        return supabase.from('products').update({ stock: productInfo.stock }).eq('id', item.id);
-    });
-    await Promise.all(stockRevertPromises);
-    throw new Error('No se pudo crear la orden. Se ha intentado revertir el stock. Por favor, verifique el carrito y reintente.');
-  }
-
-  const orderItemsToInsert = items.map(item => ({
-    order_id: newOrder.id,
-    product_id: item.id,
-    quantity: item.quantity,
-    price_at_purchase: item.price,
-  }));
-
-  const { error: orderItemsError } = await supabase.from('order_items').insert(orderItemsToInsert);
-
-  if (orderItemsError) {
-    console.error(`Order items creation failed for order ${newOrder.id}. Error:`, orderItemsError);
-    console.log('Attempting to revert stock updates and delete order...');
-    const stockRevertPromises = items.map(item => {
-        const productInfo = stockMap.get(item.id)!;
-        return supabase.from('products').update({ stock: productInfo.stock }).eq('id', item.id);
-    });
-    await Promise.all(stockRevertPromises);
-    await supabase.from('orders').delete().eq('id', newOrder.id);
-    throw new Error('No se pudieron guardar los detalles de la orden. La orden ha sido cancelada. Por favor, reintente.');
-  }
-
-  // Invalidate cache for this user
-  try {
-    clientCache.invalidate(`orders_${orderData.user_id}`);
-    await fetch(`/api/orders?userId=${orderData.user_id}`, { method: 'DELETE' });
-  } catch (e) {
-    console.error('Failed to invalidate orders cache:', e);
-  }
-
-  return newOrder;
+/**
+ * Contrato de entrada de place_order_atomic.
+ * El navegador solo envía producto y cantidad: nunca precio, total ni user_id.
+ */
+export interface PlaceOrderItemInput {
+  product_id: string;
+  quantity: number;
 }
 
+export interface PlaceOrderResult {
+  order_id: string;
+  total_price: number;
+  status: string;
+}
 
-export async function getUserOrders(userId: string): Promise<EnrichedOrder[]> {
+export interface TransitionOrderResult {
+  order_id: string;
+  status: string;
+}
+
+interface RpcErrorLike {
+  code?: string | null;
+  message?: string | null;
+  details?: string | null;
+  hint?: string | null;
+}
+
+const DB_UNAVAILABLE = 'El servicio de base de datos no está disponible.';
+
+function requireClient() {
   if (!supabase) {
-    console.error("Supabase client not available.");
-    return [];
+    throw new Error(DB_UNAVAILABLE);
   }
-  await new Promise(resolve => setTimeout(resolve, 300));
+  return supabase;
+}
 
-  const { data: ordersData, error: ordersError } = await supabase
+/**
+ * Normaliza y valida el carrito antes de enviarlo a PostgreSQL.
+ * La validación definitiva (stock, precios, permisos) vive en la función SQL.
+ */
+export function normalizeOrderItems(items: PlaceOrderItemInput[]): PlaceOrderItemInput[] {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('El carrito está vacío.');
+  }
+
+  const aggregated = new Map<string, number>();
+
+  for (const item of items) {
+    if (!item || typeof item.product_id !== 'string' || item.product_id.trim() === '') {
+      throw new Error('El carrito contiene un producto inválido.');
+    }
+
+    const quantity = Number(item.quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new Error('Las cantidades deben ser números enteros mayores que cero.');
+    }
+
+    aggregated.set(item.product_id, (aggregated.get(item.product_id) ?? 0) + quantity);
+  }
+
+  return Array.from(aggregated.entries()).map(([product_id, quantity]) => ({
+    product_id,
+    quantity,
+  }));
+}
+
+/**
+ * Traduce los SQLSTATE/hints de PostgreSQL a mensajes de usuario.
+ * Mapa acordado con REC-03:
+ *   28000 -> 401, 42501 -> 403, 23514 -> 409, 22023/22P02 -> 400.
+ */
+export function mapRpcError(error: RpcErrorLike | null | undefined): Error {
+  if (!error) {
+    return new Error('No se pudo completar la operación.');
+  }
+
+  const hint = error.hint ?? '';
+
+  if (hint === 'NO_AUTENTICADO' || error.code === '28000') {
+    return new Error('Debes iniciar sesión para continuar.');
+  }
+
+  if (hint === 'SIN_PERMISO' || error.code === '42501') {
+    return new Error('No tienes permiso para realizar esta operación.');
+  }
+
+  if (hint === 'STOCK_INSUFICIENTE') {
+    return new Error(
+      error.message?.trim() ||
+        'No hay stock suficiente para uno o más productos del carrito.'
+    );
+  }
+
+  if (hint === 'TRANSICION_INVALIDA' || error.code === '23514') {
+    return new Error(
+      error.message?.trim() || 'El pedido ya no permite la acción solicitada.'
+    );
+  }
+
+  if (hint === 'ITEM_INVALIDO' || hint === 'PRODUCTO_INVALIDO' || error.code === '22023') {
+    return new Error(
+      error.message?.trim() || 'El pedido contiene datos inválidos. Revisa el carrito.'
+    );
+  }
+
+  if (hint === 'SEDE_INVALIDA') {
+    return new Error('La sede de recojo seleccionada no es válida.');
+  }
+
+  if (hint === 'FECHA_INVALIDA') {
+    return new Error('La fecha de recojo debe ser futura.');
+  }
+
+  if (hint === 'NOTAS_INVALIDAS') {
+    return new Error('Las notas del pedido son demasiado largas.');
+  }
+
+  if (hint === 'PEDIDO_NO_ENCONTRADO' || error.code === '22P02') {
+    return new Error('El pedido no existe o ya no está disponible.');
+  }
+
+  console.error('Error RPC de pedidos:', error);
+  return new Error(error.message?.trim() || 'No se pudo completar la operación.');
+}
+
+async function currentUserId(): Promise<string> {
+  const client = requireClient();
+  const { data, error } = await client.auth.getUser();
+
+  if (error || !data?.user) {
+    throw new Error('Debes iniciar sesión para continuar.');
+  }
+
+  return data.user.id;
+}
+
+function invalidateOrdersCache(userId: string) {
+  try {
+    clientCache.invalidate(`orders_${userId}`);
+  } catch (error) {
+    console.error('No se pudo invalidar la caché local de pedidos:', error);
+  }
+}
+
+/**
+ * Crea el pedido y reserva el stock en una sola transacción PostgreSQL.
+ * El total y el comprador los determina la base de datos.
+ */
+export async function placeOrderAtomic(input: {
+  locationId: string;
+  pickupDate: string;
+  notes?: string | null;
+  items: PlaceOrderItemInput[];
+}): Promise<PlaceOrderResult> {
+  const client = requireClient();
+
+  if (!input.locationId) {
+    throw new Error('Debes seleccionar una sede de recojo.');
+  }
+
+  if (!input.pickupDate || Number.isNaN(new Date(input.pickupDate).getTime())) {
+    throw new Error('Debes seleccionar una fecha de recojo válida.');
+  }
+
+  if (new Date(input.pickupDate).getTime() <= Date.now()) {
+    throw new Error('La fecha de recojo debe ser futura.');
+  }
+
+  const items = normalizeOrderItems(input.items);
+  const userId = await currentUserId();
+
+  const { data, error } = await client.rpc('place_order_atomic', {
+    location_id: input.locationId,
+    pickup_date: input.pickupDate,
+    notes: input.notes?.trim() ? input.notes.trim() : null,
+    items,
+  });
+
+  if (error) {
+    throw mapRpcError(error);
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+
+  if (!row?.order_id) {
+    throw new Error('No se pudo confirmar el pedido.');
+  }
+
+  invalidateOrdersCache(userId);
+
+  return {
+    order_id: row.order_id,
+    total_price: Number(row.total_price),
+    status: row.status,
+  };
+}
+
+/**
+ * Compatibilidad con el flujo anterior. Ya no acepta precios ni user_id:
+ * esos valores los determina PostgreSQL.
+ */
+export async function placeOrderWithStockUpdate(
+  orderData: Pick<Order, 'location_id' | 'pickup_date' | 'notes'>,
+  items: CartItem[]
+): Promise<PlaceOrderResult> {
+  return placeOrderAtomic({
+    locationId: orderData.location_id,
+    pickupDate: orderData.pickup_date,
+    notes: orderData.notes ?? null,
+    items: items.map(item => ({
+      product_id: item.id,
+      quantity: item.quantity,
+    })),
+  });
+}
+
+/**
+ * Historial del usuario autenticado. El parámetro se conserva por
+ * compatibilidad, pero la autoridad es la sesión y RLS.
+ */
+export async function getUserOrders(_userId?: string): Promise<EnrichedOrder[]> {
+  const client = requireClient();
+  const userId = await currentUserId();
+
+  const { data: ordersData, error: ordersError } = await client
     .from('orders')
     .select(`
       id, user_id, location_id, order_date, pickup_date, status, total_price, notes, created_at, updated_at,
-      locations (name_es, address) 
+      locations (name_es, address)
     `)
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
 
   if (ordersError) {
     console.error('Error fetching orders:', ordersError);
-    return [];
+    throw new Error('No se pudieron cargar tus pedidos.');
   }
+
   if (!ordersData) return [];
 
   const enrichedOrders: EnrichedOrder[] = [];
 
   for (const order of ordersData) {
-    const { data: orderItemsData, error: orderItemsError } = await supabase
+    const { data: orderItemsData, error: orderItemsError } = await client
       .from('order_items')
       .select(`*, products (name_es, thumbnail_url, image_urls)`)
       .eq('order_id', order.id);
@@ -138,9 +264,9 @@ export async function getUserOrders(userId: string): Promise<EnrichedOrder[]> {
     if (orderItemsError) {
       console.error(`Error fetching items for order ${order.id}:`, orderItemsError);
     }
-    
-    const items: EnrichedOrderItem[] = orderItemsData?.map(item => {
-      const product = item.products as any; 
+
+    const items: EnrichedOrderItem[] = (orderItemsData ?? []).map(item => {
+      const product = item.products as any;
       let imageUrl = 'https://placehold.co/80x80.png';
       if (product?.thumbnail_url) imageUrl = product.thumbnail_url;
       else if (product?.image_urls?.[0]) imageUrl = product.image_urls[0];
@@ -150,7 +276,7 @@ export async function getUserOrders(userId: string): Promise<EnrichedOrder[]> {
         productName: product?.name_es || 'Nombre no disponible',
         productImageUrl: imageUrl,
       };
-    }) || [];
+    });
 
     const locationDetails = order.locations as any;
     enrichedOrders.push({
@@ -160,67 +286,38 @@ export async function getUserOrders(userId: string): Promise<EnrichedOrder[]> {
       items,
     });
   }
+
   return enrichedOrders;
 }
 
-export async function cancelOrder(orderId: string, userId: string): Promise<boolean> {
-  if (!supabase) {
-    throw new Error("El servicio de base de datos no está disponible.");
-  }
-  
-  const { data: orderToCancel, error: orderFetchError } = await supabase
-    .from('orders')
-    .select(`*, order_items(*)`)
-    .eq('id', orderId)
-    .eq('user_id', userId)
-    .single();
-    
-  if (orderFetchError) throw new Error("No se pudo encontrar la orden para cancelar.");
-  if (!orderToCancel) throw new Error("La orden no existe o no tienes permiso para cancelarla.");
-  if (orderToCancel.status !== 'pending') throw new Error("Solo se pueden cancelar pedidos que están en estado 'pendiente'.");
+/**
+ * Cancela un pedido propio pendiente mediante transition_order_atomic.
+ * El userId se conserva por compatibilidad y no se usa como autoridad.
+ */
+export async function cancelOrder(orderId: string, _userId?: string): Promise<boolean> {
+  const client = requireClient();
 
-  const itemsToRestore = orderToCancel.order_items;
-  if (itemsToRestore?.length > 0) {
-    for (const item of itemsToRestore) {
-      const { data: product, error: productError } = await supabase
-        .from('products')
-        .select('stock')
-        .eq('id', item.product_id)
-        .single();
-
-      if (productError || !product) {
-        console.error(`No se pudo obtener el producto ${item.product_id} para restaurar stock.`);
-        continue;
-      }
-      
-      const newStock = product.stock + item.quantity;
-      const { error: updateError } = await supabase
-        .from('products')
-        .update({ stock: newStock })
-        .eq('id', item.product_id);
-        
-      if (updateError) {
-        console.error(`Fallo al restaurar stock para el producto ${item.product_id}. Error: ${updateError.message}`);
-      }
-    }
+  if (!orderId) {
+    throw new Error('El pedido es obligatorio.');
   }
 
-  const { error: updateError } = await supabase
-    .from('orders')
-    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
-    .eq('id', orderId);
+  const userId = await currentUserId();
 
-  if (updateError) {
-    throw new Error("Se restauró el stock pero no se pudo actualizar el estado de la orden. Contacta a soporte.");
+  const { data, error } = await client.rpc('transition_order_atomic', {
+    order_id: orderId,
+    new_status: 'cancelled',
+  });
+
+  if (error) {
+    throw mapRpcError(error);
   }
 
-  // Invalidate cache for this user
-  try {
-    clientCache.invalidate(`orders_${userId}`);
-    await fetch(`/api/orders?userId=${userId}`, { method: 'DELETE' });
-  } catch (e) {
-    console.error('Failed to invalidate orders cache:', e);
+  const row = Array.isArray(data) ? data[0] : data;
+
+  if (!row?.order_id) {
+    throw new Error('No se pudo cancelar el pedido.');
   }
 
+  invalidateOrdersCache(userId);
   return true;
 }
