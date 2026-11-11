@@ -37,12 +37,15 @@ const resources = [
 const dashboard = { stats: { totalOrders: 1, totalRevenue: 25.5, activeProducts: 0, activeLocations: 0 }, recentOrders: [recent] };
 
 // Exercise the real auth helper, route handlers and Supabase client without network calls.
-function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
+function harness({ orders = [recent], revenueLimit = Infinity, catalogLimit = Infinity } = {}) {
   const routes = {};
   const events = [];
   const redis = new Map();
+  const deadlines = new Map();
+  const clock = { now: 1_700_000_000_000 };
   const rows = {
     products: new Map(),
+    categories: new Map([[categoryId, category]]),
     locations: new Map(),
     orders: new Map(orders.map((order) => [order.id, order])),
   };
@@ -54,13 +57,21 @@ function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
     async get(key) {
       events.push(['get', key]);
       if (faults.redisRead) throw new Error('Redis unavailable');
+      if (deadlines.get(key) <= clock.now) {
+        redis.delete(key);
+        deadlines.delete(key);
+      }
       return redis.get(key) ?? null;
     }
-    async set(key, value, option, ttl) {
-      events.push(['set', key, option, ttl]);
+    async time() {
+      return [String(Math.floor(clock.now / 1000)), String((clock.now % 1000) * 1000)];
+    }
+    async set(key, value, option, deadline) {
+      events.push(['set', key, option, deadline]);
       if (faults.redisWrite) throw new Error('Redis unavailable');
       if (option === 'NX' && redis.has(key)) return null;
       redis.set(key, value);
+      if (option === 'PXAT') deadlines.set(key, deadline);
       return 'OK';
     }
     async mset(...entries) {
@@ -107,7 +118,6 @@ function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
       return new Response(null, { headers: { 'Content-Range': count ? `0-${count - 1}/${count}` : '*/0' } });
     }
     if (request.method === 'GET') {
-      if (table === 'categories') return Response.json([category]);
       if (table === 'orders') {
         const orders = [...rows.orders.values()];
         if (columns !== revenueColumns) return Response.json(orders.slice(0, 5));
@@ -125,6 +135,12 @@ function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
       }
       const snapshot = [...rows[table].values()];
       await faults.pauseRead?.(table);
+      if (table === 'products' || table === 'categories') {
+        const cursor = url.searchParams.get('id')?.slice('gt.'.length) ?? '';
+        const limit = Math.min(Number(url.searchParams.get('limit')), catalogLimit);
+        return Response.json(snapshot.filter((row) => row.id > cursor)
+          .sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit));
+      }
       return Response.json(snapshot);
     }
 
@@ -145,10 +161,12 @@ function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
     }),
   };
   const adminAuth = load('lib/adminAuth', { 'server-only': {}, './supabase/adminClient': supabase });
+  const adminPagination = load('lib/adminPagination', {});
 
   for (const resource of ['catalogo', 'ubicaciones', 'dashboard']) {
     routes[resource] = load(`app/api/admin/${resource}/route`, {
       '@/lib/adminAuth': adminAuth,
+      '@/lib/adminPagination': adminPagination,
       '@/lib/adminRouteCache': adminRouteCache,
       '@/lib/supabase/adminClient': supabase,
     });
@@ -164,7 +182,7 @@ function harness({ orders = [recent], revenueLimit = Infinity } = {}) {
     }));
   }
 
-  return { call, dataCalls, events, faults, redis, routes, rows, invalidate: adminRouteCache.invalidateAdminRouteCache };
+  return { call, clock, dataCalls, events, faults, redis, routes, rows, invalidate: adminRouteCache.invalidateAdminRouteCache };
 }
 
 async function expectJson(response, status, data) {
@@ -211,9 +229,9 @@ for (const [resource, table, fields] of resources) {
     assert.deepEqual(events.slice(0, 2), [['auth', 'worker'], ['profile', 'worker']]);
     assert.ok(events.some(([operation, key]) => operation === 'get' && key.includes(':worker:')));
     assert.ok(!events.some(([operation, key]) => operation === 'get' && key.includes(':admin:')));
-    assert.deepEqual(dataCalls.map(({ table, columns }) => [table, columns]), table === 'products'
-      ? [['products', 'id,name_es,description_es,price,stock,category_id,categories(name_es)'], ['categories', 'id,name_es']]
-      : [['locations', 'id,name_es,address']]);
+    assert.deepEqual(new Set(dataCalls.map(({ table, columns }) => `${table}:${columns}`)), new Set(table === 'products'
+      ? ['products:id,name_es,description_es,price,stock,category_id,categories(name_es)', 'categories:id,name_es']
+      : ['locations:id,name_es,address']));
 
     dataCalls.length = 0;
     await expectJson(await call(resource, { token: 'worker' }), 200, expected);
@@ -333,6 +351,37 @@ test('catalogo: rejects invalid prices, stock and category IDs', async () => {
   assert.equal(dataCalls.length, 0);
 });
 
+test('catalogo: products and categories both advance beyond the server row cap', async () => {
+  const { call, rows, dataCalls } = harness({ catalogLimit: 1 });
+  const lowId = '00000000-0000-4000-8000-000000000001';
+  const higherId = 'ff000000-0000-4000-8000-000000000001';
+  const firstProduct = { ...product, id: lowId, name_es: 'Zanahoria' };
+  const lastProduct = { ...product, id: higherId, name_es: 'Aguacate' };
+  const extraCategory = { id: lowId, name_es: 'Alimentos' };
+  rows.products.set(higherId, lastProduct);
+  rows.products.set(lowId, firstProduct);
+  rows.categories.set(lowId, extraCategory);
+
+  const expected = { products: [lastProduct, firstProduct], categories: [extraCategory, category] };
+  await expectJson(await call('catalogo'), 200, expected);
+  for (const [table, lastId] of [['products', higherId], ['categories', categoryId]]) {
+    const pages = dataCalls.filter((entry) => entry.table === table).map(({ url }) => url.searchParams);
+    assert.deepEqual(pages.map((page) => page.get('id')), [null, `gt.${lowId}`, `gt.${lastId}`]);
+    assert.ok(pages.every((page) => page.get('order') === 'id.asc' && Number(page.get('limit')) > 1));
+  }
+  dataCalls.length = 0;
+  await expectJson(await call('catalogo'), 200, expected);
+  assert.equal(dataCalls.length, 0);
+});
+
+test('catalogo: a later category page failure returns 500 without caching a partial catalog', async () => {
+  const { call, events, faults, rows } = harness({ catalogLimit: 1 });
+  rows.products.set(id, { id, ...product });
+  faults.db = (table, method, _columns, url) => table === 'categories' && method === 'GET' && url.searchParams.has('id');
+  await expectJson(await call('catalogo'), 500, { error: 'INTERNAL_SERVER_ERROR' });
+  assert.ok(!events.some(([op, , option]) => op === 'set' && option === 'PXAT'));
+});
+
 for (const [resource, table, method, columns] of [
   ['catalogo', 'products', 'GET'],
   ['catalogo', 'categories', 'GET'],
@@ -348,7 +397,7 @@ for (const [resource, table, method, columns] of [
     const { call, events, faults } = harness();
     faults.db = (name, verb, select) => table === name && method === verb && (!columns || columns === select);
     await expectJson(await call(resource), 500, { error: 'INTERNAL_SERVER_ERROR' });
-    assert.ok(!events.some(([op, , option]) => op === 'set' && option === 'EX'));
+    assert.ok(!events.some(([op, , option]) => op === 'set' && option === 'PXAT'));
   });
 }
 
@@ -386,7 +435,7 @@ test('dashboard: a later revenue page failure returns 500 without caching a subt
   const { call, events, faults } = harness();
   faults.db = (table, method, columns, url) => columns === revenueColumns && url.searchParams.has('id');
   await expectJson(await call('dashboard'), 500, { error: 'INTERNAL_SERVER_ERROR' });
-  assert.ok(!events.some(([op, , option]) => op === 'set' && option === 'EX'));
+  assert.ok(!events.some(([op, , option]) => op === 'set' && option === 'PXAT'));
 });
 
 test('dashboard: a dashboard-only invalidation reloads order metrics and keeps the catalog cache', async () => {
@@ -430,9 +479,73 @@ test('catalogo: an older in-flight read cannot repopulate the cache after invali
 });
 
 test('ubicaciones: a Redis outage does not report a committed mutation as failed', async () => {
-  const { call, faults } = harness();
+  const { call, clock, faults, rows } = harness();
+  await expectJson(await call('ubicaciones'), 200, []);
+  await expectJson(await call('ubicaciones', { token: 'worker' }), 200, []);
+  await expectJson(await call('dashboard'), 200, dashboard);
+
   faults.redisWrite = true;
   await expectJson(await call('ubicaciones', { method: 'POST', body: location }), 201, { id });
+  assert.deepEqual(rows.locations.get(id), { id, ...location });
+  faults.redisWrite = false;
+
   faults.redisRead = true;
   await expectJson(await call('ubicaciones'), 200, [{ id, ...location }]);
+  faults.redisRead = false;
+  clock.now += 299_999;
+  await expectJson(await call('ubicaciones'), 200, []);
+  await expectJson(await call('ubicaciones', { token: 'worker' }), 200, []);
+  await expectJson(await call('dashboard'), 200, dashboard);
+
+  clock.now += 1;
+  await expectJson(await call('ubicaciones'), 200, [{ id, ...location }]);
+  await expectJson(await call('ubicaciones', { token: 'worker' }), 200, [{ id, ...location }]);
+  await expectJson(await call('dashboard'), 200, { ...dashboard, stats: { ...dashboard.stats, activeLocations: 1 } });
+});
+
+test('dashboard: a failed version SET retains the old metric only until its original deadline', async () => {
+  const pending = { ...recent, status: 'pending' };
+  const expectedBefore = { stats: { ...dashboard.stats, totalRevenue: 0 }, recentOrders: [pending] };
+  const { call, clock, faults, rows, invalidate } = harness({ orders: [pending] });
+  await expectJson(await call('dashboard'), 200, expectedBefore);
+  clock.now += 1_000;
+  rows.orders.set(id, recent);
+  faults.redisWrite = true;
+  await invalidate('dashboard');
+  faults.redisWrite = false;
+  await expectJson(await call('dashboard'), 200, expectedBefore);
+  clock.now += 299_000;
+  await expectJson(await call('dashboard'), 200, dashboard);
+});
+
+test('catalogo: a slow read cannot give an old snapshot a new TTL after a failed invalidation', { timeout: 5000 }, async () => {
+  const { call, clock, events, faults, rows } = harness();
+  const startedAt = clock.now;
+  rows.products.set(id, { id, ...product });
+  let markReady;
+  let resume;
+  const ready = new Promise((resolve) => { markReady = resolve; });
+  const release = new Promise((resolve) => { resume = resolve; });
+  faults.pauseRead = async (table) => {
+    if (table !== 'products') return;
+    markReady();
+    await release;
+  };
+
+  const pendingRead = call('catalogo');
+  try {
+    await ready;
+    faults.redisWrite = true;
+    await expectJson(await call('catalogo', { method: 'PATCH', body: { id, name_es: 'Actualizado' } }), 200, { id });
+    faults.redisWrite = false;
+    clock.now += 300_001;
+  } finally {
+    resume();
+  }
+
+  await expectJson(await pendingRead, 200, { products: [{ id, ...product }], categories: [category] });
+  assert.ok(events.some(([op, , option, deadline]) => op === 'set' && option === 'PXAT' && deadline === startedAt + 300_000));
+  await expectJson(await call('catalogo'), 200, {
+    products: [{ id, ...product, name_es: 'Actualizado' }], categories: [category],
+  });
 });

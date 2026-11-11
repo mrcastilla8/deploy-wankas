@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { authenticateAdmin } from '@/lib/adminAuth';
+import { collectAdminRows } from '@/lib/adminPagination';
 import { invalidateAdminRouteCache, readAdminRouteCache } from '@/lib/adminRouteCache';
 import { createAdminClient } from '@/lib/supabase/adminClient';
 
@@ -38,15 +39,19 @@ export async function GET(request: Request) {
     const payload = await readAdminRouteCache('catalogo', auth.principal.role, async () => {
       const supabase = createAdminClient();
       const [products, categories] = await Promise.all([
-        supabase.from('products')
-          .select('id, name_es, description_es, price, stock, category_id, categories(name_es)')
-          .order('name_es', { ascending: true }),
-        supabase.from('categories').select('id, name_es'),
+        collectAdminRows((limit, afterId) => {
+          const page = supabase.from('products')
+            .select('id, name_es, description_es, price, stock, category_id, categories(name_es)')
+            .order('id').limit(limit);
+          return afterId ? page.gt('id', afterId) : page;
+        }),
+        collectAdminRows((limit, afterId) => {
+          const page = supabase.from('categories').select('id, name_es').order('id').limit(limit);
+          return afterId ? page.gt('id', afterId) : page;
+        }),
       ]);
-      if (products.error || categories.error || !products.data || !categories.data) {
-        throw new Error('Admin catalog query failed');
-      }
-      return { products: products.data, categories: categories.data };
+      products.sort((left, right) => left.name_es.localeCompare(right.name_es, 'es'));
+      return { products, categories };
     });
     return json(payload);
   } catch {

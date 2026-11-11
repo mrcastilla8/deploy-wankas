@@ -37,7 +37,7 @@ function loadModule(file, imports) {
 // Exercise both production modules and the real SDK, replacing only Supabase HTTP and Redis.
 function harness({
   role = 'admin', targetRole = 'worker', targetLocation = null, email = newUser.email,
-  profileEmail = email, intercept, afterAuthWrite, afterProfileWrite,
+  profileEmail = email, intercept, afterAuthWrite, afterProfileWrite, extraProfiles = [], rowLimit = 1,
 } = {}) {
   const calls = [];
   const state = {
@@ -69,7 +69,11 @@ function harness({
         const { email, role, updated_at } = state.profile;
         return Response.json([{ email, role, updated_at }]);
       }
-      return Response.json([{ ...state.profile, password_hash: 'test-hash', phone_number: 'test-phone' }]);
+      const afterId = call.params.get('id')?.slice('gt.'.length) ?? '';
+      const limit = Math.min(Number(call.params.get('limit')), rowLimit);
+      return Response.json([state.profile, ...extraProfiles].filter((profile) => profile.id > afterId)
+        .sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit)
+        .map((profile) => ({ ...profile, password_hash: 'test-hash', phone_number: 'test-phone' })));
     }
     if (call.path === locationPath && call.method === 'GET') return Response.json([{ id: locationId }]);
     if (call.path === profilePath && call.method === 'PATCH') {
@@ -112,6 +116,7 @@ function harness({
       'next/server': { NextResponse },
       zod: { z },
       '@/lib/adminAuth': auth,
+      '@/lib/adminPagination': loadModule('lib/adminPagination.ts', {}),
       '@/lib/supabase/adminClient': adminClient,
       '@/lib/redis': { sessionStore: { del: async (key) => calls.push({ method: 'DEL', path: key }) } },
     });
@@ -167,7 +172,27 @@ test('el admin recibe solo los campos explícitos sin caché ni password_hash', 
   assert.equal(response.headers.get('cache-control'), 'no-store');
   await expectResponse(response, 200, [listedUser]);
   assert.equal(calls[2].params.get('select'), 'id,name,email,role,location_id');
-  assert.equal(calls[2].params.get('order'), 'name.asc');
+  assert.equal(calls[2].params.get('order'), 'id.asc');
+});
+
+test('GET recorre páginas limitadas y ordena por nombre, con los nombres nulos al final', async () => {
+  const first = { ...listedUser, id: '00000000-0000-4000-8000-000000000001', name: null };
+  const last = { ...listedUser, id: 'ff000000-0000-4000-8000-000000000001', name: 'Aarón' };
+  const { request, calls } = harness({ extraProfiles: [last, first] });
+
+  await expectResponse(await request('GET'), 200, [last, listedUser, first]);
+  assert.deepEqual(calls.slice(2).map(({ params }) => params.get('id')),
+    [null, `gt.${first.id}`, `gt.${targetId}`, `gt.${last.id}`]);
+  assert.ok(calls.slice(2).every(({ params }) => Number(params.get('limit')) > 1));
+});
+
+test('GET devuelve 500 si falla una página posterior del listado de usuarios', async () => {
+  const { request, calls } = harness({
+    intercept: ({ method, path, params }) => method === 'GET' && path === profilePath && params.get('id') === `gt.${targetId}`
+      ? Response.json({ code: 'XX000', message: 'Private error' }, { status: 500 }) : undefined,
+  });
+  await expectResponse(await request('GET'), 500, { error: 'INTERNAL_SERVER_ERROR' });
+  assert.equal(calls.length, 4);
 });
 
 test('el admin crea un worker, persiste el rol y solo después invalida la caché', async () => {

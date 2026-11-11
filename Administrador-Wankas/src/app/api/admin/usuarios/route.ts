@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { authenticateAdmin } from '@/lib/adminAuth';
+import { collectAdminRows } from '@/lib/adminPagination';
 import { createAdminClient } from '@/lib/supabase/adminClient';
 import type { Database } from '@/types/database.types';
 
@@ -31,8 +32,10 @@ type ProfileGuard = Partial<EmailSnapshot & Pick<ProfileRow, 'role'>>;
 function profiles(supabase: AdminClient) {
   const table = () => supabase.schema('public').from('profiles');
   return {
-    list: () => table().select('id, name, email, role, location_id').order('name')
-      .overrideTypes<ListedProfile[], { merge: false }>(),
+    list: () => collectAdminRows((limit, afterId) => {
+      const page = table().select('id, name, email, role, location_id').order('id').limit(limit);
+      return (afterId ? page.gt('id', afterId) : page).overrideTypes<ListedProfile[], { merge: false }>();
+    }),
     read: (id: string) => table().select('email, role, updated_at').eq('id', id).maybeSingle(),
     update: (id: string, changes: ProfileChanges, guard?: ProfileGuard) => {
       let query = table().update(changes).eq('id', id);
@@ -175,8 +178,12 @@ async function mutationSucceeded(id: string, status = 200) {
 
 export async function GET(request: Request) {
   return withAdmin(request, async (supabase) => {
-    const { data, error } = await profiles(supabase).list();
-    if (error || !data) return internalError('Users lookup failed', error?.code);
+    const data = await profiles(supabase).list();
+    data.sort((left, right) => {
+      if (left.name === null) return right.name === null ? 0 : 1;
+      if (right.name === null) return -1;
+      return left.name.localeCompare(right.name, 'es');
+    });
 
     const payload = data.map(({ id, name, email, role, location_id }) => ({ id, name, email, role, location_id }));
     return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } });

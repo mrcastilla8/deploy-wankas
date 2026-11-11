@@ -30,12 +30,16 @@ const serviceKey = 'test-only-service-key';
 const userId = 'b0403ad6-67f3-42b7-a46d-6586f924a736';
 const assignedLocation = '832ed3a4-dfc9-42b9-9975-d88cd5d1aaa6';
 const otherLocation = '742dfe10-710c-409f-97fb-478c911d22aa';
-const localOrder = { id: 'ce86f30a-96bb-481b-aefc-08b6aa8ed99b', location_id: assignedLocation };
-const otherOrder = { id: '637a1931-3f8d-436e-960d-969b73f9782a', location_id: otherLocation };
+const localOrder = {
+  id: 'ce86f30a-96bb-481b-aefc-08b6aa8ed99b', location_id: assignedLocation, created_at: '2025-01-03T00:00:00Z',
+};
+const otherOrder = {
+  id: '637a1931-3f8d-436e-960d-969b73f9782a', location_id: otherLocation, created_at: '2025-01-01T00:00:00Z',
+};
 const validBody = { order_id: localOrder.id, new_status: 'completed' };
 const orders = [localOrder, otherOrder];
 
-function harness({ role = 'admin', location = null, ordersError = false, rpc } = {}) {
+function harness({ role = 'admin', location = null, rows = orders, rowLimit = 1, ordersError, rpc } = {}) {
   const calls = [];
   const invalidations = [];
   const fetchSupabase = async (input, init) => {
@@ -48,9 +52,12 @@ function harness({ role = 'admin', location = null, ordersError = false, rpc } =
       case '/rest/v1/profiles':
         return Response.json([{ role, location_id: location }]);
       case '/rest/v1/orders': {
-        if (ordersError) return dbError('XX000', null, 500);
+        if (ordersError?.(url)) return dbError('XX000', null, 500);
         const filter = url.searchParams.get('location_id');
-        return Response.json(filter ? orders.filter((order) => `eq.${order.location_id}` === filter) : orders);
+        const afterId = url.searchParams.get('id')?.slice('gt.'.length) ?? '';
+        const limit = Math.min(Number(url.searchParams.get('limit')), rowLimit);
+        return Response.json(rows.filter((order) => order.id > afterId && (!filter || `eq.${order.location_id}` === filter))
+          .sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit));
       }
       case '/rest/v1/rpc/transition_order_atomic':
         assert.ok(rpc, 'Unexpected RPC');
@@ -80,6 +87,7 @@ function harness({ role = 'admin', location = null, ordersError = false, rpc } =
     },
     'zod': zod,
     '@/lib/adminAuth': adminAuth,
+    '@/lib/adminPagination': loadSource('lib/adminPagination.ts', {}),
     '@/lib/adminRouteCache': {
       invalidateAdminRouteCache: async (resource) => { invalidations.push(resource); },
     },
@@ -127,16 +135,19 @@ for (const method of ['GET', 'PATCH']) {
 }
 
 test('GET: worker scope comes from public.profiles despite spoofed query parameters', async () => {
-  const route = harness({ role: 'worker', location: assignedLocation });
+  const olderLocalOrder = { ...localOrder, id: '535f6dbd-cf33-4b34-bf18-2dca9faee1c4', created_at: '2025-01-02T00:00:00Z' };
+  const route = harness({ role: 'worker', location: assignedLocation, rows: [...orders, olderLocalOrder] });
   const response = await route.GET(request('GET', { query: `?role=admin&location_id=${otherLocation}` }));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'private, no-store');
-  assert.deepEqual(await response.json(), [localOrder]);
-  assert.deepEqual(route.paths(), [...authPaths, '/rest/v1/orders']);
+  assert.deepEqual(await response.json(), [localOrder, olderLocalOrder]);
+  assert.deepEqual(route.paths(), [...authPaths, ...Array(3).fill('/rest/v1/orders')]);
   const profileUrl = new URL(route.calls[1].url);
   assert.equal(profileUrl.searchParams.get('id'), `eq.${userId}`);
   assert.equal(route.calls[1].headers.get('accept-profile'), 'public');
-  assert.equal(new URL(route.calls[2].url).searchParams.get('location_id'), `eq.${assignedLocation}`);
+  const pages = route.calls.slice(2).map((call) => new URL(call.url).searchParams);
+  assert.ok(pages.every((params) => params.get('location_id') === `eq.${assignedLocation}`));
+  assert.deepEqual(pages.map((params) => params.get('id')), [null, `gt.${olderLocalOrder.id}`, `gt.${localOrder.id}`]);
 });
 
 test('GET: an authorized admin receives the explicit projection across locations', async () => {
@@ -146,7 +157,8 @@ test('GET: an authorized admin receives the explicit projection across locations
   assert.deepEqual(await response.json(), orders);
   const { searchParams } = new URL(route.calls[2].url);
   assert.equal(searchParams.has('location_id'), false);
-  assert.equal(searchParams.get('order'), 'created_at.desc');
+  assert.equal(searchParams.get('order'), 'id.asc');
+  assert.ok(Number(searchParams.get('limit')) > 1);
   assert.equal(searchParams.get('select'), [
     'id', 'user_id', 'location_id', 'order_date', 'pickup_date', 'status', 'total_price', 'notes',
     'created_at', 'updated_at', 'profiles(name)', 'locations(name_es)', 'order_items(product_id,quantity)',
@@ -154,8 +166,14 @@ test('GET: an authorized admin receives the explicit projection across locations
 });
 
 test('GET: a Supabase error returns 500 without a success payload or database details', async () => {
-  const route = harness({ ordersError: true });
+  const route = harness({ ordersError: () => true });
   await expectError(await route.GET(request('GET')), 500, 'INTERNAL_SERVER_ERROR');
+});
+
+test('GET: failure on the next page does not return the orders from the first page', async () => {
+  const route = harness({ ordersError: (url) => url.searchParams.has('id') });
+  await expectError(await route.GET(request('GET')), 500, 'INTERNAL_SERVER_ERROR');
+  assert.deepEqual(route.paths(), [...authPaths, '/rest/v1/orders', '/rest/v1/orders']);
 });
 
 test('PATCH: a customer receives 403 before invoking the RPC', async () => {

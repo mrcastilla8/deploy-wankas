@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { authenticateAdmin, type AdminPrincipal } from '@/lib/adminAuth';
+import { collectAdminRows } from '@/lib/adminPagination';
 import { invalidateAdminRouteCache } from '@/lib/adminRouteCache';
 import { createAdminClient } from '@/lib/supabase/adminClient';
 
@@ -69,11 +70,15 @@ export async function GET(request: Request) {
   if (!auth.ok) return auth.response;
 
   try {
-    let query = createAdminClient().from('orders').select(orderFields);
-    if (auth.locationId) query = query.eq('location_id', auth.locationId);
-
-    const { data, error } = await query.order('created_at', { ascending: false });
-    if (error || !data) return errorResponse('INTERNAL_SERVER_ERROR', 500);
+    const supabase = createAdminClient();
+    const data = await collectAdminRows((limit, afterId) => {
+      let page = supabase.from('orders').select(orderFields).order('id').limit(limit);
+      if (auth.locationId) page = page.eq('location_id', auth.locationId);
+      if (afterId) page = page.gt('id', afterId);
+      return page;
+    });
+    data.sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)
+      || right.created_at.localeCompare(left.created_at));
 
     return NextResponse.json(data, { headers: privateHeaders });
   } catch {

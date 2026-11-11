@@ -5,8 +5,8 @@ import Redis from 'ioredis';
 import type { AdminPrincipal } from './adminAuth';
 
 type Resource = 'catalogo' | 'ubicaciones' | 'dashboard';
-const prefix = 'admin:routes:v2';
-const ttlSeconds = 300;
+const prefix = 'admin:routes:v3';
+const ttlMs = 5 * 60 * 1000;
 let redis: Redis | undefined;
 
 function getRedis() {
@@ -37,6 +37,7 @@ export async function readAdminRouteCache(
 ): Promise<unknown> {
   let cache: Redis | undefined;
   let key: string | undefined;
+  let expiresAt: number | undefined;
   try {
     cache = getRedis();
     if (cache) {
@@ -50,6 +51,10 @@ export async function readAdminRouteCache(
         key = `${prefix}:${resource}:${role}:${current}`;
         const cached = await cache.get(key);
         if (cached !== null) return JSON.parse(cached);
+
+        // Measure before the DB read using the same clock that expires the key.
+        const [seconds, microseconds] = await cache.time();
+        expiresAt = Number(seconds) * 1000 + Math.floor(Number(microseconds) / 1000) + ttlMs;
       }
     }
   } catch {
@@ -57,9 +62,10 @@ export async function readAdminRouteCache(
   }
 
   const data = await load();
-  if (cache && key) {
+  if (cache && key && expiresAt !== undefined) {
     try {
-      await cache.set(key, JSON.stringify(data), 'EX', ttlSeconds);
+      // A slow read or a delayed SET cannot give an old result a fresh TTL.
+      await cache.set(key, JSON.stringify(data), 'PXAT', expiresAt);
     } catch {
       console.warn('Admin route cache write failed', resource);
     }
