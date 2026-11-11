@@ -93,7 +93,7 @@ Reglas:
 
 | Rol | Crear pedido | Completar | Cancelar |
 |---|---|---|---|
-| `customer` | Sí | No | Solo su propio pedido pendiente |
+| `user` (o `customer`) | Sí | No | Solo su propio pedido pendiente |
 | `worker` | Sí | Solo pedidos de su `profiles.location_id` | Solo pedidos de su sede |
 | `admin` | Sí | Cualquier pedido | Cualquier pedido |
 | `anon` | No | No | No |
@@ -238,12 +238,13 @@ Solo una reserva; la otra recibe `23514 / STOCK_INSUFICIENTE`; el stock final es
 
 - **REC-01**: `public.profiles.location_id` debe existir antes de aplicar esta
   migración. La asignación es la fuente de verdad para autorizar workers.
-- **REC-03**: debe publicar
-  `Administrador-Wankas/src/lib/adminFetch.ts` con la firma
-  `adminFetch(path: string, init?: RequestInit): Promise<Response>` y el
-  `PATCH /api/admin/pedidos`. La pantalla de pedidos ya consume ese contrato.
-  Mientras el helper no exista, el typecheck del admin requiere un stub local
-  **no versionado**; este PR no lo incluye.
+- **REC-03**: ya publicó
+  `Administrador-Wankas/src/lib/adminFetch.ts` en la rama
+  `fix/wankas-admin-seguridad`, con la firma
+  `adminFetch(path: string, init?: RequestInit): Promise<Response>`; es
+  compatible con la pantalla de pedidos. Falta que esa rama llegue a `main`
+  para que el build de admin quede verde. Este PR no incluye el helper porque
+  es propiedad de DEV-3.
 - **REC-03**: el `GET /api/admin/pedidos` debe dejar de confiar en
   `?role=` y `?location_id=` enviados por el navegador y derivar rol y sede de
   la sesión en el servidor. La pantalla de pedidos ya no envía esos parámetros:
@@ -261,8 +262,17 @@ Solo una reserva; la otra recibe `23514 / STOCK_INSUFICIENTE`; el stock final es
 - Las pruebas SQL **no se ejecutaron**; no hay evidencia de resultados reales en
   esta entrega.
 - La migración asume el esquema del README (`orders`, `order_items`,
-  `products`, `locations`, `profiles`). No se inspeccionó el proyecto Supabase
-  real por falta de MCP/credenciales.
+  `products`, `locations`, `profiles`). Se inspeccionó el proyecto real por
+  PostgREST: las tablas y tipos coinciden, pero **`profiles.location_id` aún no
+  existe** (`42703`), por lo que la migración falla en su precondición hasta
+  que REC-01 lo agregue.
+- El proyecto real usa `role = 'user'` para los clientes (25 usuarios), no
+  `'customer'`. La migración acepta `'user'` y `'customer'` como alias.
+- Las funciones `place_order_atomic` y `transition_order_atomic` todavía no
+  existen en el proyecto real; solo `is_admin` e `is_admin_or_worker`.
+- El build de `Administrador-Wankas` en Vercel queda rojo hasta que la rama
+  `fix/wankas-admin-seguridad` (que ya contiene `src/lib/adminFetch.ts`) se
+  integre en `main`. No se crea ese archivo aquí porque es propiedad de DEV-3.
 - La integración administrativa queda **Draft** hasta que REC-03 publique el
   helper y el endpoint.
 - La autorización de workers depende de REC-01; sin `profiles.location_id` la

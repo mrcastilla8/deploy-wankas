@@ -75,11 +75,13 @@ insert into public.locations (id, name_es, address) values
 on conflict (id) do update
   set name_es = excluded.name_es, address = excluded.address;
 
+-- El proyecto real usa 'user' para clientes; c2 conserva 'customer' para
+-- verificar que el alias de compatibilidad tambien funciona.
 insert into public.profiles (id, name, email, role, location_id) values
   ('00000000-0000-0000-0000-0000000000a1', 'Admin', 'admin@test.local', 'admin', null),
   ('00000000-0000-0000-0000-0000000000b1', 'Worker Central', 'worker1@test.local', 'worker', '10000000-0000-0000-0000-000000000001'),
   ('00000000-0000-0000-0000-0000000000b2', 'Worker Tambo', 'worker2@test.local', 'worker', '10000000-0000-0000-0000-000000000002'),
-  ('00000000-0000-0000-0000-0000000000c1', 'Cliente Uno', 'cliente1@test.local', 'customer', null),
+  ('00000000-0000-0000-0000-0000000000c1', 'Cliente Uno', 'cliente1@test.local', 'user', null),
   ('00000000-0000-0000-0000-0000000000c2', 'Cliente Dos', 'cliente2@test.local', 'customer', null)
 on conflict (id) do update
   set role = excluded.role, location_id = excluded.location_id;
@@ -153,7 +155,10 @@ select tests.assert_eq(
 
 -- ----------------------------------------------------------------------------
 -- T2. Completar no vuelve a descontar stock.
+-- Completar lo hace admin/worker; el cliente no puede (ver T11).
 -- ----------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000a1', true);
+
 select *
   from public.transition_order_atomic(:'t1_order_id'::uuid, 'completed')
 \gset t2_
@@ -167,7 +172,10 @@ select tests.assert_eq(
 
 -- ----------------------------------------------------------------------------
 -- T3. No se puede cancelar un pedido completado.
+-- Se ejecuta como cliente para cubrir ese camino de autorizacion.
 -- ----------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000c1', true);
+
 select tests.expect_error(
   format('select public.transition_order_atomic(%L::uuid, %L)', :'t1_order_id', 'cancelled'),
   '23514',
@@ -219,7 +227,10 @@ select tests.assert_eq(
 
 -- ----------------------------------------------------------------------------
 -- T5. No se puede completar un pedido cancelado.
+-- Con admin se supera la autorizacion y se llega al estado terminal.
 -- ----------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000a1', true);
+
 select tests.expect_error(
   format('select public.transition_order_atomic(%L::uuid, %L)', :'t4_order_id', 'completed'),
   '23514',
@@ -369,7 +380,7 @@ select *
 select tests.expect_error(
   format('select public.transition_order_atomic(%L::uuid, %L)', :'t11_order_id', 'completed'),
   '42501',
-  'T11 customer -> completed es rechazado'
+  'T11 user -> completed es rechazado'
 );
 
 -- ----------------------------------------------------------------------------
@@ -380,7 +391,7 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000c2
 select tests.expect_error(
   format('select public.transition_order_atomic(%L::uuid, %L)', :'t11_order_id', 'cancelled'),
   '42501',
-  'T12 customer no cancela pedido ajeno'
+  'T12 cliente no cancela pedido ajeno'
 );
 
 -- ----------------------------------------------------------------------------

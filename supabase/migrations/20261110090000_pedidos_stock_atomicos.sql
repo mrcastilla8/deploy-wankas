@@ -117,7 +117,9 @@ begin
       using errcode = '28000', hint = 'NO_AUTENTICADO';
   end if;
 
-  if v_role is null or v_role not in ('customer', 'worker', 'admin') then
+  -- En el proyecto real los clientes usan el rol 'user'; se acepta 'customer'
+  -- como alias por compatibilidad con el esquema del README.
+  if v_role is null or v_role not in ('user', 'customer', 'worker', 'admin') then
     raise exception 'El rol de la sesión no puede crear pedidos.'
       using errcode = '42501', hint = 'SIN_PERMISO';
   end if;
@@ -298,7 +300,7 @@ $place_order$;
 -- Autorización:
 --   admin  -> cualquier pedido
 --   worker -> solo pedidos de su public.profiles.location_id
---   customer -> solo cancelar su propio pedido
+--   user/customer -> solo cancelar su propio pedido
 -- ----------------------------------------------------------------------------
 drop function if exists public.transition_order_atomic(uuid, text);
 
@@ -366,7 +368,7 @@ begin
       raise exception 'No tienes autorización sobre la sede de este pedido.'
         using errcode = '42501', hint = 'SIN_PERMISO';
     end if;
-  elsif v_role = 'customer' then
+  elsif v_role in ('user', 'customer') then
     if v_order_user is distinct from v_uid then
       raise exception 'No puedes modificar pedidos de otros usuarios.'
         using errcode = '42501', hint = 'SIN_PERMISO';

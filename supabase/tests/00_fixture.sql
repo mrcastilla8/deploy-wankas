@@ -65,7 +65,7 @@ create table if not exists public.profiles (
   name text,
   email text unique,
   phone_number text,
-  role text not null default 'customer',
+  role text not null default 'user',
   password_hash text,
   location_id uuid references public.locations(id) on delete set null,
   created_at timestamptz not null default now(),
