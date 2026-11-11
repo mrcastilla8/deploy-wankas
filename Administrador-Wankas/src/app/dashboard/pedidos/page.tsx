@@ -9,6 +9,7 @@ import { adminFetch } from "@/lib/adminFetch"
 import { adminCache } from "@/lib/adminCache"
 import {
   initialOrdersState,
+  isCurrentResponse,
   ordersReducer,
   selectIsOrdersLoading,
   selectVisibleOrders,
@@ -70,10 +71,11 @@ export default function PedidosPage() {
   const [locations, setLocations] = React.useState<Location[]>([])
   const [activeTab, setActiveTab] = React.useState<string>("Todos")
 
+  const updatingOrderId = ordersState.updatingOrderId
+
   const [locationFilter, setLocationFilter] = React.useState<string>("all")
   const [searchTerm, setSearchTerm] = React.useState("")
   const [dateFilter, setDateFilter] = React.useState<Date | undefined>()
-  const [updatingOrderId, setUpdatingOrderId] = React.useState<string | null>(null)
 
   const statuses: string[] = ["Todos", "Pendiente", "Completado", "Cancelado"]
 
@@ -82,8 +84,26 @@ export default function PedidosPage() {
     () => (user ? `${user.id}:${user.role}:${user.location_id ?? 'all'}` : null),
     [user]
   )
-  const identityRef = React.useRef<string | null>(null)
+  // Se sincroniza en el render para que una respuesta asíncrona pueda comparar
+  // contra la identidad vigente sin esperar a los efectos.
+  const sessionIdentityRef = React.useRef<string | null>(null)
+  sessionIdentityRef.current = sessionIdentity
+  // Última identidad ya invalidada, para no repetir la limpieza en cada render.
+  const invalidatedIdentityRef = React.useRef<string | null>(null)
   const requestSeqRef = React.useRef(0)
+
+  // Una respuesta solo puede tocar el estado si pertenece a la solicitud más
+  // reciente y a la sesión vigente.
+  const isCurrent = React.useCallback(
+    (requestId: number, identity: string) =>
+      isCurrentResponse(
+        requestId,
+        requestSeqRef.current,
+        identity,
+        sessionIdentityRef.current
+      ),
+    []
+  )
 
   const invalidateOrders = React.useCallback(
     (reason: 'identity-changed' | 'auth-error') => {
@@ -136,7 +156,7 @@ export default function PedidosPage() {
       // La caché de pedidos nunca se pinta sin esta comprobación.
       const res = await adminFetch('/api/admin/pedidos')
 
-      if (requestId !== requestSeqRef.current) return
+      if (!isCurrent(requestId, identity)) return
 
       if (handleAuthError(res.status)) {
         return
@@ -148,7 +168,7 @@ export default function PedidosPage() {
 
       const ordersData = await res.json()
 
-      if (requestId !== requestSeqRef.current) return
+      if (!isCurrent(requestId, identity)) return
 
       dispatchOrders({
         type: 'request-succeeded',
@@ -165,7 +185,7 @@ export default function PedidosPage() {
           } else {
             const locRes = await adminFetch('/api/admin/ubicaciones')
 
-            if (requestId !== requestSeqRef.current) return
+            if (!isCurrent(requestId, identity)) return
 
             if (handleAuthError(locRes.status)) {
               return
@@ -177,13 +197,13 @@ export default function PedidosPage() {
 
             const locsData = await locRes.json()
 
-            if (requestId !== requestSeqRef.current) return
+            if (!isCurrent(requestId, identity)) return
 
             adminCache.set('ubicaciones', locsData)
             setLocations(locsData)
           }
         } catch (locationError) {
-          if (requestId !== requestSeqRef.current) return
+          if (!isCurrent(requestId, identity)) return
           toast({
             variant: "destructive",
             title: "Error",
@@ -197,7 +217,7 @@ export default function PedidosPage() {
         setLocations([])
       }
     } catch (e) {
-      if (requestId !== requestSeqRef.current) return
+      if (!isCurrent(requestId, identity)) return
 
       dispatchOrders({ type: 'request-failed', requestId, identity })
 
@@ -208,15 +228,15 @@ export default function PedidosPage() {
       })
       console.error("Error fetching orders:", e)
     }
-  }, [authLoading, user, sessionIdentity, handleAuthError, toast])
+  }, [authLoading, user, sessionIdentity, isCurrent, handleAuthError, toast])
 
   // Al cambiar de sesión se limpia el estado y se invalidan las respuestas
-  // pendientes de la sesión anterior. El render ya bloquea los datos ajenos
-  // mediante `selectVisibleOrders`, sin esperar a este efecto.
+  // pendientes de la sesión anterior (GET y PATCH). El render ya bloquea los
+  // datos ajenos mediante `selectVisibleOrders`, sin esperar a este efecto.
   React.useEffect(() => {
-    if (identityRef.current === sessionIdentity) return
+    if (invalidatedIdentityRef.current === sessionIdentity) return
 
-    identityRef.current = sessionIdentity
+    invalidatedIdentityRef.current = sessionIdentity
     invalidateOrders('identity-changed')
   }, [sessionIdentity, invalidateOrders])
 
@@ -293,7 +313,16 @@ export default function PedidosPage() {
       return;
     }
 
-    setUpdatingOrderId(order.id);
+    const identity = sessionIdentity
+
+    if (!identity) {
+      return;
+    }
+
+    // El PATCH comparte la secuencia con los GET: cualquier cambio de sesión
+    // (o una solicitud posterior) invalida su respuesta.
+    const requestId = ++requestSeqRef.current
+    dispatchOrders({ type: 'patch-started', requestId, orderId: order.id })
 
     try {
       const res = await adminFetch('/api/admin/pedidos', {
@@ -304,6 +333,11 @@ export default function PedidosPage() {
           new_status: newStatus,
         }),
       });
+
+      // Respuesta de una sesión anterior: no toca estado, ni notifica, ni recarga.
+      if (!isCurrent(requestId, identity)) {
+        return;
+      }
 
       if (handleAuthError(res.status)) {
         return;
@@ -340,6 +374,10 @@ export default function PedidosPage() {
       });
       await fetchData();
     } catch (e) {
+      if (!isCurrent(requestId, identity)) {
+        return;
+      }
+
       toast({
         variant: "destructive",
         title: "Error",
@@ -347,7 +385,9 @@ export default function PedidosPage() {
       });
       console.error('Error updating order status:', e);
     } finally {
-      setUpdatingOrderId(null);
+      // El reducer ignora el token si la sesión ya cambió o si hay un PATCH más
+      // reciente; así un PATCH viejo no limpia el spinner del actual.
+      dispatchOrders({ type: 'patch-finished', requestId })
     }
   };
 

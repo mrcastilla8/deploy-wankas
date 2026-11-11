@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { adminCache } from './adminCache'
 import {
   initialOrdersState,
+  isCurrentResponse,
   ordersReducer,
   selectIsOrdersLoading,
   selectVisibleOrders,
@@ -142,4 +143,72 @@ test('una respuesta valida de la identidad actual si se muestra', () => {
 
   assert.deepEqual(selectVisibleOrders(state, WORKER), ['pedido-worker'])
   assert.equal(selectIsOrdersLoading(state, WORKER), false)
+})
+
+test('admin -> worker con PATCH pendiente: la respuesta vieja se descarta', () => {
+  let state = loadedWith(ADMIN, ['pedido-admin'])
+
+  // El admin lanza un PATCH y queda en curso.
+  state = ordersReducer(state, {
+    type: 'patch-started',
+    requestId: 2,
+    orderId: 'pedido-admin',
+  })
+  assert.equal(state.updatingOrderId, 'pedido-admin')
+
+  // Cambia la sesión mientras el PATCH sigue en vuelo.
+  state = ordersReducer(state, { type: 'identity-changed', requestId: 3 })
+  assert.equal(state.updatingOrderId, null)
+  assert.deepEqual(selectVisibleOrders(state, WORKER), [])
+
+  // Llega tarde el PATCH del admin: no limpia ni revive nada de la sesión nueva.
+  const settled = ordersReducer(state, { type: 'patch-finished', requestId: 2 })
+  assert.equal(settled, state)
+  assert.equal(settled.updatingOrderId, null)
+  assert.deepEqual(selectVisibleOrders(settled, WORKER), [])
+})
+
+test('un PATCH viejo no limpia el updatingOrderId de uno nuevo', () => {
+  let state = initialOrdersState<string>()
+  state = ordersReducer(state, {
+    type: 'patch-started',
+    requestId: 1,
+    orderId: 'pedido-admin',
+  })
+  state = ordersReducer(state, { type: 'identity-changed', requestId: 2 })
+  state = ordersReducer(state, {
+    type: 'patch-started',
+    requestId: 3,
+    orderId: 'pedido-worker',
+  })
+
+  state = ordersReducer(state, { type: 'patch-finished', requestId: 1 })
+  assert.equal(state.updatingOrderId, 'pedido-worker')
+
+  state = ordersReducer(state, { type: 'patch-finished', requestId: 3 })
+  assert.equal(state.updatingOrderId, null)
+})
+
+test('un 401/403 durante el PATCH limpia el updatingOrderId', () => {
+  let state = loadedWith(ADMIN, ['pedido-admin'])
+  state = ordersReducer(state, {
+    type: 'patch-started',
+    requestId: 2,
+    orderId: 'pedido-admin',
+  })
+
+  state = ordersReducer(state, { type: 'auth-error', requestId: 3 })
+  assert.equal(state.updatingOrderId, null)
+  assert.deepEqual(state.orders, [])
+  assert.equal(state.denied, true)
+})
+
+test('isCurrentResponse descarta respuestas de otra sesion o de otra solicitud', () => {
+  assert.equal(isCurrentResponse(5, 5, WORKER, WORKER), true)
+  // Llegó una solicitud más nueva.
+  assert.equal(isCurrentResponse(5, 6, WORKER, WORKER), false)
+  // La sesión cambió mientras la solicitud estaba en vuelo.
+  assert.equal(isCurrentResponse(5, 5, ADMIN, WORKER), false)
+  // Sin identidad no hay respuesta válida.
+  assert.equal(isCurrentResponse(5, 5, WORKER, null), false)
 })
