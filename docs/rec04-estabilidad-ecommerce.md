@@ -35,7 +35,14 @@ npm run build
 
 El conjunto cubre rutas válidas e inválidas, descartar resultados de perfil obsoletos, lista vacía, IDs distintos con el mismo nombre, campos corruptos, propagación de fallos/reintentos, códigos HTTP y `no-store`, eliminación y referencias del sistema heredado, metadata de registro y ausencia de entradas sensibles en logs Genkit. Resultado registrado en esta revisión: 7/7 pruebas aprobadas y `npm run typecheck` aprobado. `npm run build` compiló y generó las páginas; apareció una advertencia de dependencia opcional faltante `@opentelemetry/exporter-jaeger` desde Genkit/Opentelemetry.
 
-No se ejecutaron pruebas reales con Supabase Auth/PostgreSQL, correos de confirmación, login correcto/incorrecto, consultas de catálogo contra la base ni una sesión con rol alterado. Estas dependen de una instancia de prueba y credenciales aisladas; no se usaron credenciales remotas ni se cambió Supabase. Tampoco se afirma que el trigger de REC-01 esté desplegado.
+No se ejecutaron pruebas de integración con Supabase Auth/PostgreSQL, correos de confirmación, login correcto/incorrecto, consultas de catálogo contra la base ni una sesión con rol alterado. Tampoco se montó el `AuthProvider` con un SDK simulado: la prueba local cubre el guard de generación, no el despacho real de eventos del proveedor. Quedan pendientes en una instancia aislada:
+
+- Login correcto/incorrecto y transiciones de refresh, `SIGNED_IN`, `SIGNED_OUT`, `INITIAL_SESSION` duplicado y cambio rápido de identidad.
+- Logout confirmado y fallido, logout durante una consulta pendiente, desmontaje durante hidratación y confirmación de que cada ruta finaliza `isLoading`.
+- Registro simulado con sesión, sin sesión y error; trigger de perfil `customer`; confirmación y login normal; cambio de `user_metadata.role` a `admin`/`worker` sin elevar el rol PostgreSQL.
+- Cliente Supabase no configurado y consulta real con cambio de producto visible después de una nueva carga.
+
+Estas comprobaciones dependen de una instancia de prueba y credenciales aisladas; no se usaron credenciales remotas ni se cambió Supabase. Tampoco se afirma que el trigger de REC-01 esté desplegado.
 
 ## Propiedad, archivos y riesgos pendientes
 
