@@ -55,13 +55,13 @@ import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 
 export default function PedidosPage() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
   const [orders, setOrders] = React.useState<Order[]>([])
   const [locations, setLocations] = React.useState<Location[]>([])
   const [loading, setLoading] = React.useState(true)
   const [activeTab, setActiveTab] = React.useState<string>("Todos")
-  
+
   const [locationFilter, setLocationFilter] = React.useState<string>("all")
   const [searchTerm, setSearchTerm] = React.useState("")
   const [dateFilter, setDateFilter] = React.useState<Date | undefined>()
@@ -69,13 +69,23 @@ export default function PedidosPage() {
 
   const statuses: string[] = ["Todos", "Pendiente", "Completado", "Cancelado"]
 
-  const getCacheKey = React.useCallback(
-    () => `pedidos:${user?.role}:${user?.location_id ?? 'all'}`,
-    [user?.role, user?.location_id]
+  // Identidad de la sesión actual: cualquier cambio invalida datos en vuelo.
+  const sessionIdentity = React.useMemo(
+    () => (user ? `${user.id}:${user.role}:${user.location_id ?? 'all'}` : null),
+    [user]
   )
+  const identityRef = React.useRef<string | null>(null)
+  const requestSeqRef = React.useRef(0)
+
+  const clearSessionData = React.useCallback(() => {
+    setOrders([])
+    setLocations([])
+    adminCache.invalidateAll()
+  }, [])
 
   const handleAuthError = React.useCallback((status: number) => {
     if (status === 401) {
+      clearSessionData()
       toast({
         variant: "destructive",
         title: "Sesión no válida",
@@ -85,6 +95,7 @@ export default function PedidosPage() {
     }
 
     if (status === 403) {
+      clearSessionData()
       toast({
         variant: "destructive",
         title: "Sin permiso",
@@ -94,25 +105,24 @@ export default function PedidosPage() {
     }
 
     return false
-  }, [toast])
+  }, [clearSessionData, toast])
 
-  const fetchData = React.useCallback(async (forceRefresh = false) => {
-    const cacheKey = getCacheKey()
-
-    if (!forceRefresh) {
-      const cachedOrders = adminCache.get<Order[]>(cacheKey)
-      const cachedLocations = adminCache.get<Location[]>('ubicaciones')
-      if (cachedOrders) {
-        setOrders(cachedOrders)
-        if (cachedLocations) setLocations(cachedLocations)
-        setLoading(false)
-        return
-      }
+  const fetchData = React.useCallback(async () => {
+    if (authLoading || !user) {
+      return
     }
+
+    // Cada solicitud recibe un identificador: las respuestas de una sesión
+    // anterior (o de una solicitud ya superada) se descartan al resolver.
+    const requestId = ++requestSeqRef.current
 
     setLoading(true)
     try {
+      // Revalida la sesión con el servidor antes de mostrar cualquier dato.
+      // La caché de pedidos nunca se pinta sin esta comprobación.
       const res = await adminFetch('/api/admin/pedidos')
+
+      if (requestId !== requestSeqRef.current) return
 
       if (handleAuthError(res.status)) {
         return
@@ -123,15 +133,19 @@ export default function PedidosPage() {
       }
 
       const ordersData = await res.json()
-      adminCache.set(cacheKey, ordersData)
+
+      if (requestId !== requestSeqRef.current) return
+
       setOrders(ordersData)
 
-      if (user?.role === 'admin') {
-        const cachedLocs = adminCache.get<Location[]>('ubicaciones')
-        if (cachedLocs) {
-          setLocations(cachedLocs)
+      if (user.role === 'admin') {
+        const cachedLocations = adminCache.get<Location[]>('ubicaciones')
+        if (cachedLocations) {
+          setLocations(cachedLocations)
         } else {
           const locRes = await adminFetch('/api/admin/ubicaciones')
+
+          if (requestId !== requestSeqRef.current) return
 
           if (handleAuthError(locRes.status)) {
             return
@@ -142,11 +156,18 @@ export default function PedidosPage() {
           }
 
           const locsData = await locRes.json()
+
+          if (requestId !== requestSeqRef.current) return
+
           adminCache.set('ubicaciones', locsData)
           setLocations(locsData)
         }
+      } else {
+        setLocations([])
       }
     } catch (e) {
+      if (requestId !== requestSeqRef.current) return
+
       toast({
         variant: "destructive",
         title: "Error",
@@ -154,13 +175,32 @@ export default function PedidosPage() {
       })
       console.error("Error fetching orders:", e)
     } finally {
-      setLoading(false)
+      if (requestId === requestSeqRef.current) {
+        setLoading(false)
+      }
     }
-  }, [getCacheKey, handleAuthError, toast, user?.role])
+  }, [authLoading, user, handleAuthError, toast])
+
+  // Al cambiar de sesión se limpia el estado y se invalidan las respuestas
+  // pendientes de la sesión anterior.
+  React.useEffect(() => {
+    if (identityRef.current === sessionIdentity) return
+
+    identityRef.current = sessionIdentity
+    requestSeqRef.current++
+    clearSessionData()
+  }, [sessionIdentity, clearSessionData])
 
   React.useEffect(() => {
+    if (authLoading) return
+
+    if (!user) {
+      setLoading(false)
+      return
+    }
+
     fetchData()
-  }, [fetchData])
+  }, [authLoading, user, fetchData])
 
   const clearFilters = () => {
     setLocationFilter("all");
@@ -239,8 +279,7 @@ export default function PedidosPage() {
           title: "Pedido desactualizado",
           description: "El pedido ya no permite esa transición. Se recargará la lista.",
         });
-        adminCache.invalidate(getCacheKey());
-        await fetchData(true);
+        await fetchData();
         return;
       }
 
@@ -257,14 +296,13 @@ export default function PedidosPage() {
         throw new Error(message);
       }
 
-      adminCache.invalidate(getCacheKey());
       toast({
         title: "Éxito",
         description: newStatus === 'completed'
           ? "Pedido completado. El stock ya estaba reservado."
           : "Pedido cancelado y stock devuelto.",
       });
-      await fetchData(true);
+      await fetchData();
     } catch (e) {
       toast({
         variant: "destructive",
