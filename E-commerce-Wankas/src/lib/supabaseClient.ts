@@ -11,7 +11,7 @@ if (supabaseUrl && supabaseAnonKey) {
 } else {
   console.warn(
     "Supabase URL or Anon Key is missing. Check your .env file. " +
-    "The app will fall back to local data if the product service is configured to do so."
+    "Authenticated and database features will be unavailable."
   );
 }
 

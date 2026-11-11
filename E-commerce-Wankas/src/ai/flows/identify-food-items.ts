@@ -62,8 +62,8 @@ Analiza las siguientes imágenes:`;
     });
 
     if (!output) {
-      console.error('AI generate call did not return a valid output or was blocked. Input:', input, 'Prompt Parts:', promptParts);
-      const err = new Error('La API de IA no devolvió una salida válida o la solicitud fue bloqueada. Revisa la consola para más detalles.');
+      console.error('identifyFoodItemsFlow: la generación no devolvió una salida válida.');
+      const err = new Error('La API de IA no devolvió una salida válida o la solicitud fue bloqueada.');
       throw err;
     }
     return output;

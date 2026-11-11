@@ -102,7 +102,7 @@ const suggestRecipesFlow = ai.defineFlow(
   async input => {
     const { output } = await prompt(input);
     if (!output || !output.recipes || output.recipes.length === 0) {
-      console.warn('La IA no devolvió recetas o la lista está vacía. Input:', input);
+      console.warn('suggestRecipesFlow: la generación no devolvió recetas.');
       return { recipes: [] };
     }
     return output;
