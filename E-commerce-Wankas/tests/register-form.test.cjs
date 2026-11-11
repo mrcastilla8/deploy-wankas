@@ -14,6 +14,14 @@ const { outputText } = ts.transpileModule(readFileSync(filename, 'utf8'), {
   },
 });
 
+const registrationFlowFilename = join(__dirname, '../src/lib/registrationFlow.ts');
+const registrationFlowSource = readFileSync(registrationFlowFilename, 'utf8');
+const registrationFlowExports = {};
+runInNewContext(ts.transpileModule(registrationFlowSource, {
+  fileName: registrationFlowFilename,
+  compilerOptions: { module: ts.ModuleKind.CommonJS },
+}).outputText, { exports: registrationFlowExports }, { filename: registrationFlowFilename });
+
 function findForm(element) {
   if (element?.type === 'form') return element;
   const children = element?.props?.children;
@@ -52,6 +60,7 @@ async function submitRegistration(session) {
         },
       },
     },
+    '@/lib/registrationFlow': registrationFlowExports,
   };
   const exports = {};
   // Run the real submit handler with stubbed JSX, browser hooks and Auth.
