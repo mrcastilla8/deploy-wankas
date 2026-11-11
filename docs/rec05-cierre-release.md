@@ -48,7 +48,7 @@ El endpoint reúne todas las filas en memoria para construir el informe. La pagi
 
 ## 7. Instalación reproducible y pruebas
 
-Entorno ejecutado: Node `v24.3.0`, npm `11.4.2`. `npm ci` terminó correctamente en las dos carpetas y los lockfiles existentes no requirieron cambios.
+Entorno ejecutado: Node `v24.3.0`, npm `11.4.2`. `npm ci` terminó correctamente en las dos carpetas. El lockfile de Administración incluye Playwright como dependencia de desarrollo para las pruebas preparadas; el lockfile de E-commerce no cambió.
 
 Comandos ejecutados:
 
