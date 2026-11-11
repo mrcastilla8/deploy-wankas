@@ -13,12 +13,13 @@ import { Loader } from '../ui/loader';
 import { LogIn } from 'lucide-react';
 import { useLocale } from '@/context/locale-context';
 import { supabase } from '@/lib/supabaseClient';
+import { safeInternalRedirect } from '@/lib/safeRedirect';
 
 export function LoginForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { login, user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
@@ -26,7 +27,7 @@ export function LoginForm() {
 
   useEffect(() => {
     if (!authLoading && user) {
-      const redirectUrl = searchParams.get('redirect') || '/profile';
+      const redirectUrl = safeInternalRedirect(searchParams.get('redirect'));
       router.replace(redirectUrl);
     }
   }, [user, authLoading, router, searchParams]);
@@ -67,8 +68,7 @@ export function LoginForm() {
             });
         } else if (data.user) {
             toast({ title: translations.loginForm.loginSuccess, description: translations.loginForm.welcomeBack });
-            const redirectUrl = searchParams.get('redirect') || '/profile';
-            router.push(redirectUrl);
+            // Auth state change performs the single post-login navigation.
         } else {
              toast({ title: translations.loginForm.loginFailedTitle, description: translations.loginForm.loginFailedDesc, variant: 'destructive' });
         }

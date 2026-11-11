@@ -84,7 +84,7 @@ const suggestMissingIngredientsFlow = ai.defineFlow(
   async input => {
     const {output} = await prompt(input);
     if (!output) {
-        console.error("La IA no devolvió una salida para ingredientes faltantes. Input:", input);
+        console.error('suggestMissingIngredientsFlow: la generación no devolvió una salida válida.');
         return { missingIngredients: [] };
     }
     return output!;

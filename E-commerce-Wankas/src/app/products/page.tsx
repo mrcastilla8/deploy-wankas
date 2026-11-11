@@ -2,47 +2,46 @@
 
 import { ProductCard } from '@/components/product-card';
 import type { Product } from '@/types';
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { PackageSearch } from 'lucide-react';
 import { useLocale } from '@/context/locale-context';
 import { Loader } from '@/components/ui/loader';
-import { clientCache } from '@/lib/clientCache';
+import { Button } from '@/components/ui/button';
 
 export default function ProductsPage() {
   const { translations } = useLocale();
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [requestVersion, setRequestVersion] = useState(0);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [sortBy, setSortBy] = useState('name-asc');
 
-  useEffect(() => {
-    const fetchProducts = async () => {
-      const cached = clientCache.get<Product[]>('products');
-      if (cached) {
-        setAllProducts(cached);
-        setIsLoading(false);
-        return;
-      }
+  const reloadProducts = useCallback(() => setRequestVersion(version => version + 1), []);
 
-      setIsLoading(true);
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setIsLoading(true);
+    setLoadError(false);
+    void (async () => {
       try {
-        const response = await fetch('/api/products');
-        if (!response.ok) throw new Error('Network response was not ok');
-        const productsData = await response.json();
-        const uniqueProductsByName = Array.from(new Map(productsData.map((p: Product) => [p.name, p])).values()) as Product[];
-        setAllProducts(uniqueProductsByName);
-        clientCache.set('products', uniqueProductsByName);
-      } catch (error) {
-        console.error("Failed to fetch products:", error);
+        const response = await fetch('/api/products', { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('Catalog request failed');
+        const productsData: unknown = await response.json();
+        if (!Array.isArray(productsData)) throw new Error('Invalid catalog response');
+        if (active) setAllProducts(productsData as Product[]);
+      } catch {
+        if (active && !controller.signal.aborted) setLoadError(true);
       } finally {
-        setIsLoading(false);
+        if (active) setIsLoading(false);
       }
-    };
-    fetchProducts();
-  }, []);
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [requestVersion]);
 
   const categories = useMemo(() => {
     if (isLoading) return ['all'];
@@ -88,6 +87,14 @@ export default function ProductsPage() {
         <Loader text={translations.common.loading} size={48} />
       </div>
     );
+  }
+
+  if (loadError) {
+    return <section className="space-y-4 text-center py-16" role="alert">
+      <h1 className="font-headline text-3xl font-bold text-primary">{translations.productPage.title}</h1>
+      <p className="text-muted-foreground">{translations.productPage.catalogError}</p>
+      <Button onClick={reloadProducts}>{translations.productPage.retryCatalog}</Button>
+    </section>;
   }
 
   return (
@@ -142,7 +149,7 @@ export default function ProductsPage() {
       ) : (
         <div className="text-center py-12">
           <PackageSearch className="mx-auto h-24 w-24 text-muted-foreground mb-4" />
-          <h2 className="font-headline text-2xl font-semibold text-foreground mb-2">{translations.productPage.noProductsFound}</h2>
+          <h2 className="font-headline text-2xl font-semibold text-foreground mb-2">{allProducts.length === 0 ? translations.productPage.emptyCatalog : translations.productPage.noProductsFound}</h2>
           <p className="text-muted-foreground">
             {translations.productPage.noProductsHint}
           </p>
