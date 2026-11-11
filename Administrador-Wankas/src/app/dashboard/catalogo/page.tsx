@@ -4,8 +4,9 @@
 import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
 import type { Product, Category } from "@/types"
-import { createClient } from "@/lib/supabase/client"
 import { adminCache } from "@/lib/adminCache"
+import { adminMutation, adminRequest, describeAdminError } from "@/lib/adminApi"
+import { parseNewProduct, parseProductChanges, type ProductFormValues } from "@/lib/catalogoForm"
 import { Loader } from "@/components/ui/loader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -50,54 +51,71 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MoreHorizontal, PlusCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 
+// Proyección que devuelve GET /api/admin/catalogo (REC-03).
+type CatalogProduct = Pick<Product, 'id' | 'name_es' | 'description_es' | 'price' | 'stock' | 'category_id'> & {
+  categories: Pick<Category, 'name_es'> | null
+}
+type CatalogCategory = Pick<Category, 'id' | 'name_es'>
+type CatalogPayload = { products: CatalogProduct[]; categories: CatalogCategory[] }
+
+const CATALOG_API = '/api/admin/catalogo'
+const EMPTY_FORM: ProductFormValues = { name_es: "", description_es: "", price: "", stock: "", category_id: "" }
+
 export default function CatalogoPage() {
   const { user } = useAuth()
   const { toast } = useToast()
-  const [products, setProducts] = React.useState<Product[]>([])
-  const [categories, setCategories] = React.useState<Category[]>([])
+  const [products, setProducts] = React.useState<CatalogProduct[]>([])
+  const [categories, setCategories] = React.useState<CatalogCategory[]>([])
   const [loading, setLoading] = React.useState(true)
-  
+  const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [saving, setSaving] = React.useState(false)
+
   const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false)
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false)
 
-  const [productToEdit, setProductToEdit] = React.useState<Product | null>(null)
+  const [productToEdit, setProductToEdit] = React.useState<CatalogProduct | null>(null)
   const [productToDeleteId, setProductToDeleteId] = React.useState<string | null>(null)
-  
-  const [formData, setFormData] = React.useState({
-    name_es: "",
-    description_es: "",
-    price: "",
-    stock: "",
-    category_id: ""
-  })
-  
-  const supabase = createClient()
+
+  const [formData, setFormData] = React.useState<ProductFormValues>(EMPTY_FORM)
 
   const fetchProductsAndCategories = React.useCallback(async (forceRefresh = false) => {
     // Verificar caché en memoria primero (instantáneo, 0ms)
     if (!forceRefresh) {
-      const cached = adminCache.get<{ products: Product[]; categories: Category[] }>('catalogo')
+      const cached = adminCache.get<CatalogPayload>('catalogo')
       if (cached) {
         setProducts(cached.products)
         setCategories(cached.categories)
+        setLoadError(null)
         setLoading(false)
         return
       }
     }
     setLoading(true)
     try {
-      const res = await fetch('/api/admin/catalogo')
-      const data = await res.json()
+      const data = await adminRequest<CatalogPayload>(CATALOG_API)
       adminCache.set('catalogo', data)
-      setProducts(data.products ?? [])
-      setCategories(data.categories ?? [])
-    } catch (e) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudieron cargar los productos."})
-      console.error(e)
+      setProducts(data.products)
+      setCategories(data.categories)
+      setLoadError(null)
+    } catch (error) {
+      // No se muestran datos anteriores ni una lista vacía como si fuera real.
+      adminCache.invalidate('catalogo')
+      setProducts([])
+      setCategories([])
+      setLoadError(describeAdminError(error))
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  const reloadAfterMutation = React.useCallback(() => {
+    adminCache.invalidate('catalogo')
+    return fetchProductsAndCategories(true)
+  }, [fetchProductsAndCategories])
+
+  const showError = React.useCallback((error: unknown) => {
+    toast({ variant: "destructive", title: "Error", description: describeAdminError(error) })
   }, [toast])
 
   React.useEffect(() => {
@@ -114,11 +132,11 @@ export default function CatalogoPage() {
   };
 
   const handleOpenAddDialog = () => {
-    setFormData({ name_es: "", description_es: "", price: "", stock: "", category_id: "" })
+    setFormData(EMPTY_FORM)
     setIsAddDialogOpen(true)
   }
 
-  const handleOpenEditDialog = (product: Product) => {
+  const handleOpenEditDialog = (product: CatalogProduct) => {
     setProductToEdit(product)
     setFormData({
       name_es: product.name_es,
@@ -137,29 +155,22 @@ export default function CatalogoPage() {
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { name_es, description_es, price, stock, category_id } = formData;
-    
-    if (!name_es || !price || !stock || !category_id) {
-        toast({ variant: "destructive", title: "Error", description: "Por favor, rellena todos los campos obligatorios."})
-        return
+    const parsed = parseNewProduct(formData)
+    if (!parsed.ok) {
+      toast({ variant: "destructive", title: "Error", description: parsed.message })
+      return
     }
 
-    const { error } = await supabase.from('products').insert({
-      name_es,
-      description_es,
-      price: parseFloat(price),
-      stock: parseInt(stock, 10),
-      category_id,
-    })
-
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo guardar el producto."})
-      console.error(error)
-    } else {
+    setSaving(true)
+    try {
+      await adminMutation(CATALOG_API, 'POST', parsed.value)
       toast({ title: "Éxito", description: "Producto añadido correctamente."})
       setIsAddDialogOpen(false)
-      adminCache.invalidate('catalogo')
-      fetchProductsAndCategories(true)
+      await reloadAfterMutation()
+    } catch (error) {
+      showError(error)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -167,42 +178,42 @@ export default function CatalogoPage() {
     e.preventDefault()
     if (!productToEdit) return
 
-    const { name_es, description_es, price, stock, category_id } = formData;
-    const { error } = await supabase.from('products').update({
-      name_es,
-      description_es,
-      price: parseFloat(price),
-      stock: parseInt(stock, 10),
-      category_id,
-    }).eq('id', productToEdit.id)
+    const parsed = parseProductChanges(formData)
+    if (!parsed.ok) {
+      toast({ variant: "destructive", title: "Error", description: parsed.message })
+      return
+    }
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo actualizar el producto."})
-      console.error(error)
-    } else {
+    setSaving(true)
+    try {
+      // La API no permite modificar el stock por PATCH; solo se envían los datos del producto.
+      await adminMutation(CATALOG_API, 'PATCH', { id: productToEdit.id, ...parsed.value })
       toast({ title: "Éxito", description: "Producto actualizado correctamente."})
       setIsEditDialogOpen(false)
       setProductToEdit(null)
-      adminCache.invalidate('catalogo')
-      fetchProductsAndCategories(true)
+      await reloadAfterMutation()
+    } catch (error) {
+      showError(error)
+    } finally {
+      setSaving(false)
     }
   }
 
   const handleDeleteProduct = async () => {
     if (!productToDeleteId) return
 
-    const { error } = await supabase.from('products').delete().eq('id', productToDeleteId)
-    
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo eliminar el producto."})
-      console.error(error)
-    } else {
+    setSaving(true)
+    try {
+      await adminMutation(CATALOG_API, 'DELETE', { id: productToDeleteId })
       toast({ title: "Éxito", description: "Producto eliminado correctamente."})
-      adminCache.invalidate('catalogo')
-      fetchProductsAndCategories(true)
+      await reloadAfterMutation()
+    } catch (error) {
+      showError(error)
+    } finally {
+      setSaving(false)
+      setIsDeleteDialogOpen(false)
+      setProductToDeleteId(null)
     }
-    setIsDeleteDialogOpen(false)
-    setProductToDeleteId(null)
   }
 
 
@@ -215,6 +226,20 @@ export default function CatalogoPage() {
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando catálogo..." size={48} />
       </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>No se pudo cargar el catálogo</CardTitle>
+          <CardDescription>{loadError}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={() => fetchProductsAndCategories(true)}>Reintentar</Button>
+        </CardContent>
+      </Card>
     )
   }
 
@@ -327,7 +352,7 @@ export default function CatalogoPage() {
                     </div>
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Guardar Producto</Button>
+                    <Button type="submit" disabled={saving}>Guardar Producto</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
@@ -358,7 +383,10 @@ export default function CatalogoPage() {
                     </div>
                     <div className="grid gap-2">
                         <Label htmlFor="stock">Stock</Label>
-                        <Input id="stock" type="number" value={formData.stock} onChange={handleFormChange} />
+                        <Input id="stock" type="number" value={formData.stock} disabled readOnly aria-describedby="stock-help" />
+                        <p id="stock-help" className="text-xs text-muted-foreground">
+                          El stock no se puede modificar desde esta edición. Lo actualizan los pedidos.
+                        </p>
                     </div>
                     <div className="grid gap-2">
                         <Label htmlFor="category_id">Categoría</Label>
@@ -373,7 +401,7 @@ export default function CatalogoPage() {
                     </div>
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Actualizar Producto</Button>
+                    <Button type="submit" disabled={saving}>Actualizar Producto</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
@@ -390,7 +418,7 @@ export default function CatalogoPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteProduct} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+            <AlertDialogAction onClick={handleDeleteProduct} disabled={saving} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               Eliminar
             </AlertDialogAction>
           </AlertDialogFooter>
