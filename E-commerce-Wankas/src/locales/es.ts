@@ -171,6 +171,8 @@ export const es: Translations = {
     passwordMismatch: "Las contraseñas no coinciden.",
     registrationSuccessTitle: "¡Registro Exitoso!",
     registrationSuccessDesc: "Tu perfil ha sido creado. ¡Bienvenido a Wanka's!",
+    confirmEmailTitle: "Confirma tu correo electrónico",
+    confirmEmailDesc: "Revisa tu bandeja de entrada y confirma tu correo antes de iniciar sesión.",
     dbErrorTitle: "Error de Registro",
     dbErrorPrefix: "No se pudo guardar el perfil:",
     dbErrorDefault: "No se pudo crear la cuenta. Por favor, inténtalo de nuevo.",
