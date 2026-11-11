@@ -348,13 +348,21 @@ begin
   end if;
 
   -- Bloqueo del pedido: serializa transiciones concurrentes.
+  -- La sede del worker se filtra en la misma consulta: un pedido inexistente y
+  -- uno fuera de su sede producen el mismo resultado (no se filtra existencia).
   select o.status, o.user_id, o.location_id
     into v_current_status, v_order_user, v_order_location
     from public.orders o
    where o.id = transition_order_atomic.order_id
+     and (v_role <> 'worker' or o.location_id = v_worker_location)
    for update;
 
   if not found then
+    if v_role = 'worker' then
+      raise exception 'No tienes autorización sobre la sede de este pedido.'
+        using errcode = '42501', hint = 'SIN_PERMISO';
+    end if;
+
     raise exception 'El pedido no existe.'
       using errcode = '22023', hint = 'PEDIDO_NO_ENCONTRADO';
   end if;
