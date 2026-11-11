@@ -3,7 +3,7 @@
 --
 -- Ejecutar con psql DESPUÉS de:
 --   1) 00_fixture.sql
---   2) supabase/migrations/20261110090000_pedidos_stock_atomicos.sql
+--   2) supabase/migrations/20261110204830_pedidos_stock_atomicos.sql
 --
 -- El script termina con ROLLBACK para no dejar datos de prueba.
 -- ============================================================================
@@ -81,6 +81,7 @@ insert into public.profiles (id, name, email, role, location_id) values
   ('00000000-0000-0000-0000-0000000000a1', 'Admin', 'admin@test.local', 'admin', null),
   ('00000000-0000-0000-0000-0000000000b1', 'Worker Central', 'worker1@test.local', 'worker', '10000000-0000-0000-0000-000000000001'),
   ('00000000-0000-0000-0000-0000000000b2', 'Worker Tambo', 'worker2@test.local', 'worker', '10000000-0000-0000-0000-000000000002'),
+  ('00000000-0000-0000-0000-0000000000b3', 'Worker Sin Sede', 'worker3@test.local', 'worker', null),
   ('00000000-0000-0000-0000-0000000000c1', 'Cliente Uno', 'cliente1@test.local', 'user', null),
   ('00000000-0000-0000-0000-0000000000c2', 'Cliente Dos', 'cliente2@test.local', 'customer', null)
 on conflict (id) do update
@@ -594,6 +595,54 @@ select tests.assert_true(
     'EXECUTE'
   ),
   'T18 anon NO puede ejecutar transition_order_atomic'
+);
+
+-- ----------------------------------------------------------------------------
+-- T19. Worker: pedido inexistente y pedido fuera de su sede son indistinguibles.
+-- ----------------------------------------------------------------------------
+select tests.reset_data();
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000b1', true);
+
+select tests.expect_error(
+  $sql$select public.transition_order_atomic(
+    '30000000-0000-0000-0000-000000000099'::uuid, 'cancelled')$sql$,
+  '42501',
+  'T19 worker con pedido inexistente recibe 42501'
+);
+
+-- ----------------------------------------------------------------------------
+-- T20. Regresión: admin sigue recibiendo 22023 si el pedido no existe.
+-- ----------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000a1', true);
+
+select tests.expect_error(
+  $sql$select public.transition_order_atomic(
+    '30000000-0000-0000-0000-000000000099'::uuid, 'cancelled')$sql$,
+  '22023',
+  'T20 admin con pedido inexistente recibe 22023'
+);
+
+-- ----------------------------------------------------------------------------
+-- T21. Worker sin sede asignada no puede operar ningún pedido.
+-- ----------------------------------------------------------------------------
+select tests.reset_data();
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000c1', true);
+
+select *
+  from public.place_order_atomic(
+    '10000000-0000-0000-0000-000000000001'::uuid,
+    now() + interval '1 day',
+    null,
+    '[{"product_id":"20000000-0000-0000-0000-000000000001","quantity":1}]'::jsonb
+  )
+\gset t21_
+
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000b3', true);
+
+select tests.expect_error(
+  format('select public.transition_order_atomic(%L::uuid, %L)', :'t21_order_id', 'cancelled'),
+  '42501',
+  'T21 worker sin sede es rechazado'
 );
 
 \echo '== Todas las pruebas SQL de REC-02 pasaron =='
