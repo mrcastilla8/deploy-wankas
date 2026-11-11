@@ -19,8 +19,19 @@ function imageUrl(item: { thumbnail_url?: string | null; image_urls?: string[] |
   }
 }
 
-export function mapProductRows(data: any[]): Product[] {
-  return data.map((item: any): Product => {
+type ProductRow = {
+  id: string;
+  name_es: string;
+  description_es: string | null;
+  price: number;
+  stock: number;
+  image_urls: string[] | null;
+  thumbnail_url: string | null;
+  categories: { name_es: string } | { name_es: string }[] | null;
+};
+
+export function mapProductRows(data: ProductRow[]): Product[] {
+  return data.map((item): Product => {
     const category = Array.isArray(item.categories) ? item.categories[0]?.name_es : item.categories?.name_es;
     if (!item.id || typeof item.name_es !== 'string' || typeof item.price !== 'number' || typeof item.stock !== 'number' || (category !== null && category !== undefined && typeof category !== 'string')) {
       throw new ProductCatalogError('El catálogo contiene un producto con campos obligatorios inválidos.');
@@ -40,7 +51,7 @@ export function mapProductRows(data: any[]): Product[] {
 type ProductDatabaseClient = {
   from: (table: string) => {
     select: (columns: string) => {
-      order: (column: string, options: { ascending: boolean }) => PromiseLike<{ data: any[] | null; error: unknown | null }>;
+      order: (column: string, options: { ascending: boolean }) => PromiseLike<{ data: ProductRow[] | null; error: unknown | null }>;
     };
   };
 };

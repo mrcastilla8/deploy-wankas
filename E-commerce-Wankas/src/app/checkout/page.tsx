@@ -79,7 +79,8 @@ export default function CheckoutPage() {
     const timeString = selectedSlot.time.split(' - ')[0];
     
     const [time, modifier] = timeString.split(' ');
-    let [hours, minutes] = time.split(':').map(Number);
+    const [initialHours, minutes] = time.split(':').map(Number);
+    let hours = initialHours;
 
     if (modifier === 'PM' && hours < 12) hours += 12;
     if (modifier === 'AM' && hours === 12) hours = 0; 
@@ -163,12 +164,12 @@ export default function CheckoutPage() {
       });
       router.push('/profile?orderSuccess=true');
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('Failed to place order:', error);
         isSubmittingRef.current = false;
         toast({
             title: translations.checkoutPage.orderErrorTitle,
-            description: error.message || translations.checkoutPage.orderErrorFallback,
+            description: error instanceof Error ? error.message : translations.checkoutPage.orderErrorFallback,
             variant: 'destructive',
         });
     } finally {

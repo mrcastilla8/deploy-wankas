@@ -49,7 +49,7 @@ export function ImageUploader({ onImageUpload, isProcessing }: ImageUploaderProp
   }, [videoStream]);
 
   useEffect(() => {
-    let currentStream = videoStream;
+    const currentStream = videoStream;
     return () => {
       if (currentStream) {
         currentStream.getTracks().forEach(track => track.stop());
@@ -61,8 +61,8 @@ export function ImageUploader({ onImageUpload, isProcessing }: ImageUploaderProp
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files;
     if (selectedFiles) {
-      let newFiles: File[] = [...files];
-      let newPreviews: string[] = [...previews];
+      const newFiles: File[] = [...files];
+      const newPreviews: string[] = [...previews];
       let currentError: string | null = null;
 
       for (let i = 0; i < selectedFiles.length; i++) {

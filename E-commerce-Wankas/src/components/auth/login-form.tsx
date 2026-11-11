@@ -128,7 +128,7 @@ export function LoginForm() {
           </p>
           <div className="border-t border-border/60 w-full my-1" />
           <p className="text-xs text-muted-foreground text-center">
-            ¿Eres parte del equipo Wanka's?{' '}
+            ¿Eres parte del equipo Wanka&apos;s?{' '}
             <Button variant="link" asChild className="p-0 h-auto text-primary font-medium text-xs">
               <a href={(() => {
                 const url = process.env.NEXT_PUBLIC_ADMIN_URL || "http://localhost:9002";

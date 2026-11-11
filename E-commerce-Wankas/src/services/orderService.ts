@@ -267,7 +267,7 @@ export async function getUserOrders(_userId?: string): Promise<EnrichedOrder[]> 
     }
 
     const items: EnrichedOrderItem[] = (orderItemsData ?? []).map(item => {
-      const product = item.products as any;
+      const product = item.products as { name_es?: string | null; thumbnail_url?: string | null; image_urls?: string[] | null } | null;
       let imageUrl = 'https://placehold.co/80x80.png';
       if (product?.thumbnail_url) imageUrl = product.thumbnail_url;
       else if (product?.image_urls?.[0]) imageUrl = product.image_urls[0];
@@ -279,7 +279,7 @@ export async function getUserOrders(_userId?: string): Promise<EnrichedOrder[]> 
       };
     });
 
-    const locationDetails = order.locations as any;
+    const locationDetails = order.locations as { name_es?: string | null; address?: string | null } | null;
     enrichedOrders.push({
       ...order,
       location_name: locationDetails?.name_es || 'Ubicación desconocida',

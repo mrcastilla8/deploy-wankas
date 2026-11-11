@@ -4,7 +4,7 @@ import type { UserProfile } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 import { adminCache } from '@/lib/adminCache';
 import { useRouter } from 'next/navigation';
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 
 interface AuthError {
   message: string;
@@ -31,61 +31,75 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
-    const initializeAuth = async () => {
-      setLoading(true);
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user) {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select(PROFILE_FIELDS)
-            .eq('id', session.user.id)
-            .single();
-          if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
-            setUser(profile as UserProfile);
-            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(profile));
-          } else {
-            setUser(null);
-            localStorage.removeItem(USER_STORAGE_KEY);
-            supabase.auth.signOut().catch(console.error);
-          }
-        } else {
+    let requestId = 0;
+    let observedAuthUserId: string | null = null;
+    let active = true;
+    const clearUser = () => {
+      adminCache.setIdentity(null);
+      setUser(null);
+      localStorage.removeItem(USER_STORAGE_KEY);
+    };
+    const hydrate = async (authUserId: string | null, showLoading: boolean) => {
+      const currentRequest = ++requestId;
+      if (observedAuthUserId !== authUserId) {
+        const identityChanged = observedAuthUserId !== null || authUserId === null;
+        observedAuthUserId = authUserId;
+        // Al cambiar el sujeto autenticado se ocultan inmediatamente los datos previos.
+        if (identityChanged) {
+          adminCache.setIdentity(null);
           setUser(null);
-          localStorage.removeItem(USER_STORAGE_KEY);
+        }
+      }
+      if (showLoading) setLoading(true);
+      if (!authUserId) {
+        clearUser();
+        if (active && currentRequest === requestId) setLoading(false);
+        return;
+      }
+      try {
+        const { data: profile } = await supabase.from('profiles').select(PROFILE_FIELDS)
+          .eq('id', authUserId).single();
+        if (!active || currentRequest !== requestId) return;
+        if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
+          const hydrated = profile as UserProfile;
+          const nextIdentity = `${hydrated.id}:${hydrated.role}:${hydrated.location_id ?? ''}`;
+          adminCache.setIdentity(nextIdentity);
+          setUser(hydrated);
+          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(hydrated));
+        } else {
+          clearUser();
+          supabase.auth.signOut().catch(console.error);
         }
       } catch (error) {
-        console.error("Failed to parse user session", error);
-        localStorage.removeItem(USER_STORAGE_KEY);
-        setUser(null);
+        if (!active || currentRequest !== requestId) return;
+        console.error('Failed to hydrate user profile', error);
+        clearUser();
+      } finally {
+        if (active && currentRequest === requestId) setLoading(false);
       }
-      setLoading(false);
     };
-    initializeAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select(PROFILE_FIELDS)
-          .eq('id', session.user.id)
-          .single();
-        if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
-          setUser(profile as UserProfile);
-          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(profile));
-        } else {
-          setUser(null);
-          localStorage.removeItem(USER_STORAGE_KEY);
-        }
-      } else {
-        setUser(null);
-        localStorage.removeItem(USER_STORAGE_KEY);
-      }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      // Do not await Supabase work from inside its auth event callback.
+      queueMicrotask(() => { void hydrate(session?.user.id ?? null, false); });
+    });
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      if (active) void hydrate(session?.user.id ?? null, true);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      requestId += 1;
+      observedAuthUserId = null;
+      console.error('Failed to read auth session', error);
+      clearUser();
+      setLoading(false);
     });
 
     return () => {
+      active = false;
+      requestId += 1;
       if (subscription) subscription.unsubscribe();
     };
   }, [supabase]);
@@ -130,6 +144,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       const userProfile = profile as UserProfile;
+      adminCache.setIdentity(`${userProfile.id}:${userProfile.role}:${userProfile.location_id ?? ''}`);
       setUser(userProfile);
       localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userProfile));
 

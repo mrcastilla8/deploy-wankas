@@ -1,11 +1,12 @@
 
 "use client"
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import jsPDF from 'jspdf';
 import autoTable, { type UserOptions } from 'jspdf-autotable';
 import { useAuth } from '@/hooks/use-auth';
-import { createClient } from '@/lib/supabase/client';
+import { adminRequest, describeAdminError } from '@/lib/adminApi';
+import { canExportReport, ReportRequestGate } from '@/lib/reportRequestState';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, type TooltipProps } from 'recharts';
@@ -13,7 +14,6 @@ import type { NameType, ValueType } from 'recharts/types/component/DefaultToolti
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import type { Order, Product, Location as LocationType } from '@/types';
 import { Download, DollarSign, ShoppingCart, Package, TrendingUp, BarChart2 } from 'lucide-react';
 import { format, parseISO, isWithinInterval, startOfMonth, endOfMonth, subMonths, subDays, endOfDay as dateFnsEndOfDay } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -69,43 +69,78 @@ const renderEmptyState = (message: string, description: string, height: number =
     </div>
 );
 
+type ReportOrder = {
+    id: string;
+    order_date: string;
+    status: string;
+    total_price: number;
+    locations: { name_es: string } | null;
+    order_items: Array<{
+        quantity: number;
+        price_at_purchase: number;
+        products: { name_es: string; categories: { name_es: string } | null } | null;
+    }>;
+};
+type ReportProduct = { id: string; name_es: string; stock: number };
+type ReportPayload = { orders: ReportOrder[]; products: ReportProduct[] };
+
 export default function ReportsClient() {
     const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
+    const hasUser = Boolean(user?.id);
     const [activeTab, setActiveTab] = useState('sales');
     const [timeRange, setTimeRange] = useState('30d');
     
-    const [orders, setOrders] = useState<Order[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
-    const [locations, setLocations] = useState<LocationType[]>([]);
+    const [orders, setOrders] = useState<ReportOrder[]>([]);
+    const [products, setProducts] = useState<ReportProduct[]>([]);
     const [loading, setLoading] = useState(true);
-    const supabase = createClient();
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [loaded, setLoaded] = useState(false);
+    const requestGeneration = useRef(new ReportRequestGate());
+    const currentIdentity = user ? `${user.id}:${user.role}:${user.location_id ?? ''}` : null;
+    const requestIdentity = useRef<string | null>(null);
+    const [dataIdentity, setDataIdentity] = useState<string | null>(null);
 
     const fetchReportData = useCallback(async () => {
+        const generation = requestGeneration.current.begin();
+        const identity = requestIdentity.current;
         setLoading(true);
-        const { data: ordersData, error: ordersError } = await supabase
-            .from('orders')
-            .select('*, order_items(*, products(*, categories(*))), locations(*)');
-        
-        const { data: productsData, error: productsError } = await supabase.from('products').select('*');
-        const { data: locationsData, error: locationsError } = await supabase.from('locations').select('*');
-
-        if (ordersError || productsError || locationsError) {
-            console.error("Error fetching report data:", ordersError || productsError || locationsError);
-        } else {
-            setOrders((ordersData ?? []) as Order[]);
-            setProducts(productsData || []);
-            setLocations(locationsData || []);
+        setLoadError(null);
+        setLoaded(false);
+        try {
+            const data = await adminRequest<ReportPayload>('/api/admin/informes');
+            if (!requestGeneration.current.isCurrent(generation)) return;
+            setOrders(data.orders);
+            setProducts(data.products);
+            setDataIdentity(identity);
+            setLoaded(true);
+        } catch (error) {
+            if (!requestGeneration.current.isCurrent(generation)) return;
+            setOrders([]);
+            setProducts([]);
+            setDataIdentity(null);
+            setLoadError(describeAdminError(error));
+        } finally {
+            if (requestGeneration.current.isCurrent(generation)) setLoading(false);
         }
-        setLoading(false);
-    }, [supabase]);
+    }, []);
 
     useEffect(() => {
-        if (user?.role === 'admin') {
+        const gate = requestGeneration.current;
+        if (isAdmin) {
+            requestIdentity.current = currentIdentity;
             fetchReportData();
         } else {
+            gate.invalidate();
+            setOrders([]);
+            setProducts([]);
+            setDataIdentity(null);
+            setLoaded(false);
+            setLoadError(hasUser ? 'No tienes permisos para consultar los informes.' : null);
             setLoading(false);
         }
-    }, [user, fetchReportData]);
+        return () => { gate.invalidate(); };
+    }, [currentIdentity, isAdmin, hasUser, fetchReportData]);
 
     const filteredOrders = useMemo(() => {
         if (!orders) return [];
@@ -115,7 +150,7 @@ export default function ReportsClient() {
             try {
                 const orderDate = parseISO(o.order_date);
                 return isWithinInterval(orderDate, { start, end });
-            } catch (error) {
+            } catch {
                 console.warn(`Invalid date format for order ${o.id}: ${o.order_date}`);
                 return false;
             }
@@ -135,7 +170,7 @@ export default function ReportsClient() {
                 if (!acc[day]) acc[day] = { date: day, ventas: 0, pedidos: 0 };
                 acc[day].ventas += order.total_price || 0;
                 acc[day].pedidos += 1;
-            } catch (e) { }
+            } catch { }
             return acc;
         }, {} as Record<string, { date: string, ventas: number, pedidos: number }>);
         
@@ -299,12 +334,22 @@ export default function ReportsClient() {
       return <p>Acceso denegado.</p>;
     }
   
-    if (loading) {
+    if (loading || (isAdmin && dataIdentity !== currentIdentity && !loadError)) {
       return <p>Cargando informes...</p>;
     }
 
+    if (loadError || !loaded) {
+      return <div role="alert" className="space-y-3 rounded-md border p-4">
+        <p>{loadError ?? 'No se pudieron validar los datos del informe.'}</p>
+        <Button onClick={fetchReportData}>Reintentar</Button>
+      </div>;
+    }
+
+    const hasNoSourceData = orders.length === 0 && products.length === 0;
+
     return (
         <div className="space-y-6">
+            {hasNoSourceData && <p role="status" className="rounded-md border p-4 text-muted-foreground">La API confirmó que no hay pedidos ni productos registrados.</p>}
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                 <Select value={timeRange} onValueChange={setTimeRange}>
                     <SelectTrigger className="w-full sm:w-[180px]">
@@ -316,7 +361,7 @@ export default function ReportsClient() {
                         <SelectItem value="lastMonth">Mes pasado</SelectItem>
                     </SelectContent>
                 </Select>
-                <Button onClick={handleDownloadPdf} className="bg-accent text-accent-foreground hover:bg-accent/90 w-full sm:w-auto">
+                <Button disabled={!canExportReport(loaded, loading)} onClick={handleDownloadPdf} className="bg-accent text-accent-foreground hover:bg-accent/90 w-full sm:w-auto">
                     <Download className="mr-2 h-4 w-4" />
                     Generar Informe PDF
                 </Button>

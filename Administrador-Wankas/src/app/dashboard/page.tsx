@@ -23,38 +23,59 @@ type DashboardPayload = {
 
 export default function DashboardPage() {
   const { user } = useAuth()
+  const sessionIdentity = user ? `${user.id}:${user.role}:${user.location_id ?? ''}` : null
   const router = useRouter()
   const [data, setData] = React.useState<DashboardPayload | null>(null)
   const [loadError, setLoadError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(true)
+  const requestGeneration = React.useRef(0)
+  const [dataIdentity, setDataIdentity] = React.useState<string | null>(null)
+  const requestIdentity = React.useRef<string | null>(null)
 
   const isAdmin = user?.role === 'admin'
 
   const fetchDashboardData = React.useCallback(async () => {
+    const generation = ++requestGeneration.current
+    const identity = requestIdentity.current
     setLoading(true)
     try {
-      setData(await adminRequest<DashboardPayload>('/api/admin/dashboard'))
+      const result = await adminRequest<DashboardPayload>('/api/admin/dashboard')
+      if (generation !== requestGeneration.current) return
+      setData(result)
+      setDataIdentity(identity)
       setLoadError(null)
     } catch (error) {
+      if (generation !== requestGeneration.current) return
       setData(null)
+      setDataIdentity(null)
       setLoadError(describeAdminError(error))
     } finally {
-      setLoading(false)
+      if (generation === requestGeneration.current) setLoading(false)
     }
   }, [])
 
   React.useEffect(() => {
-    // No hacer nada hasta que el usuario esté autenticado
-    if (!user) return
+    // Invalidar solicitudes y datos al perder la sesión.
+    if (!user) {
+      requestGeneration.current += 1
+      setData(null)
+      setDataIdentity(null)
+      setLoadError(null)
+      setLoading(false)
+      return
+    }
     // El resumen es solo para administradores; el trabajador trabaja desde sus pedidos.
     if (!isAdmin) {
+      requestGeneration.current += 1
+      setData(null)
       router.replace('/dashboard/pedidos')
       return
     }
+    requestIdentity.current = sessionIdentity
     fetchDashboardData()
-  }, [user, isAdmin, router, fetchDashboardData])
+  }, [user, isAdmin, router, fetchDashboardData, sessionIdentity])
 
-  if (!isAdmin || loading) {
+  if (!isAdmin || loading || (sessionIdentity !== null && dataIdentity !== sessionIdentity && !loadError)) {
     return (
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando panel..." size={48} />

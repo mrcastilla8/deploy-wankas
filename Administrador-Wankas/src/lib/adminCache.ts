@@ -13,8 +13,28 @@ type CacheEntry<T> = {
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutos
 
 const store = new Map<string, CacheEntry<unknown>>();
+let identity: string | null = null;
+let generation = 0;
+let identityGeneration = 0;
 
 export const adminCache = {
+  setIdentity(nextIdentity: string | null): number {
+    if (identity !== nextIdentity) {
+      identity = nextIdentity;
+      generation += 1;
+      identityGeneration += 1;
+      store.clear();
+    }
+    return generation;
+  },
+
+  getGeneration(): number { return generation; },
+  isCurrent(requestGeneration: number): boolean { return requestGeneration === generation; },
+  getIdentity(): string | null { return identity; },
+  hasIdentity(requestIdentity: string | null): boolean { return identity === requestIdentity; },
+  getIdentityGeneration(): number { return identityGeneration; },
+  isSameIdentityGeneration(requestGeneration: number): boolean { return identityGeneration === requestGeneration; },
+
   get<T>(key: string, ttlMs = DEFAULT_TTL_MS): T | null {
     const entry = store.get(key) as CacheEntry<T> | undefined;
     if (!entry) return null;
@@ -25,7 +45,8 @@ export const adminCache = {
     return entry.data;
   },
 
-  set<T>(key: string, data: T): void {
+  set<T>(key: string, data: T, requestGeneration = generation): void {
+    if (requestGeneration !== generation) return;
     store.set(key, { data, fetchedAt: Date.now() });
   },
 
@@ -35,5 +56,6 @@ export const adminCache = {
 
   invalidateAll(): void {
     store.clear();
+    generation += 1;
   },
 };

@@ -5,7 +5,7 @@ import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
 import type { Product, Category } from "@/types"
 import { adminCache } from "@/lib/adminCache"
-import { adminMutation, adminRequest, describeAdminError } from "@/lib/adminApi"
+import { AdminApiError, adminMutation, adminRequest, describeAdminError } from "@/lib/adminApi"
 import { parseNewProduct, parseProductChanges, type ProductFormValues } from "@/lib/catalogoForm"
 import { Loader } from "@/components/ui/loader"
 import { Badge } from "@/components/ui/badge"
@@ -34,16 +34,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -63,29 +53,34 @@ const EMPTY_FORM: ProductFormValues = { name_es: "", description_es: "", price: 
 
 export default function CatalogoPage() {
   const { user } = useAuth()
+  const sessionIdentity = user ? `${user.id}:${user.role}:${user.location_id ?? ''}` : null
   const { toast } = useToast()
   const [products, setProducts] = React.useState<CatalogProduct[]>([])
   const [categories, setCategories] = React.useState<CatalogCategory[]>([])
   const [loading, setLoading] = React.useState(true)
   const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [dataIdentity, setDataIdentity] = React.useState<string | null>(null)
   const [saving, setSaving] = React.useState(false)
 
   const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false)
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false)
 
   const [productToEdit, setProductToEdit] = React.useState<CatalogProduct | null>(null)
-  const [productToDeleteId, setProductToDeleteId] = React.useState<string | null>(null)
 
   const [formData, setFormData] = React.useState<ProductFormValues>(EMPTY_FORM)
 
   const fetchProductsAndCategories = React.useCallback(async (forceRefresh = false) => {
+    const requestGeneration = adminCache.getGeneration()
+    const requestIdentity = adminCache.getIdentity()
+    const identityGeneration = adminCache.getIdentityGeneration()
+    let authErrorForCurrentIdentity = false
     // Verificar caché en memoria primero (instantáneo, 0ms)
     if (!forceRefresh) {
       const cached = adminCache.get<CatalogPayload>('catalogo')
       if (cached) {
         setProducts(cached.products)
         setCategories(cached.categories)
+        setDataIdentity(sessionIdentity)
         setLoadError(null)
         setLoading(false)
         return
@@ -94,33 +89,45 @@ export default function CatalogoPage() {
     setLoading(true)
     try {
       const data = await adminRequest<CatalogPayload>(CATALOG_API)
-      adminCache.set('catalogo', data)
+      if (!adminCache.isCurrent(requestGeneration)) return
+      adminCache.set('catalogo', data, requestGeneration)
       setProducts(data.products)
       setCategories(data.categories)
+      setDataIdentity(sessionIdentity)
       setLoadError(null)
     } catch (error) {
+      authErrorForCurrentIdentity = error instanceof AdminApiError && error.isAuthError
+        && adminCache.hasIdentity(requestIdentity)
+        && adminCache.isSameIdentityGeneration(identityGeneration)
+      if (!adminCache.isCurrent(requestGeneration) && !authErrorForCurrentIdentity) return
       // No se muestran datos anteriores ni una lista vacía como si fuera real.
       adminCache.invalidate('catalogo')
       setProducts([])
       setCategories([])
+      setDataIdentity(sessionIdentity)
       setLoadError(describeAdminError(error))
     } finally {
-      setLoading(false)
+      if (adminCache.isCurrent(requestGeneration) || authErrorForCurrentIdentity) setLoading(false)
     }
-  }, [])
+  }, [sessionIdentity])
 
   const reloadAfterMutation = React.useCallback(() => {
     adminCache.invalidate('catalogo')
     return fetchProductsAndCategories(true)
   }, [fetchProductsAndCategories])
 
-  const showError = React.useCallback((error: unknown) => {
+  const showError = React.useCallback((error: unknown, identityGeneration: number) => {
+    if (error instanceof AdminApiError && error.isAuthError && adminCache.isSameIdentityGeneration(identityGeneration)) {
+      setProducts([])
+      setCategories([])
+      setLoadError(describeAdminError(error))
+    }
     toast({ variant: "destructive", title: "Error", description: describeAdminError(error) })
   }, [toast])
 
   React.useEffect(() => {
     fetchProductsAndCategories()
-  }, [fetchProductsAndCategories])
+  }, [fetchProductsAndCategories, user?.id, user?.role, user?.location_id])
   
   const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { id, value } = e.target;
@@ -148,11 +155,6 @@ export default function CatalogoPage() {
     setIsEditDialogOpen(true)
   }
 
-  const handleOpenDeleteDialog = (productId: string) => {
-    setProductToDeleteId(productId)
-    setIsDeleteDialogOpen(true)
-  }
-
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault()
     const parsed = parseNewProduct(formData)
@@ -162,13 +164,14 @@ export default function CatalogoPage() {
     }
 
     setSaving(true)
+    const identityGeneration = adminCache.getIdentityGeneration()
     try {
       await adminMutation(CATALOG_API, 'POST', parsed.value)
       toast({ title: "Éxito", description: "Producto añadido correctamente."})
       setIsAddDialogOpen(false)
       await reloadAfterMutation()
     } catch (error) {
-      showError(error)
+      showError(error, identityGeneration)
     } finally {
       setSaving(false)
     }
@@ -185,6 +188,7 @@ export default function CatalogoPage() {
     }
 
     setSaving(true)
+    const identityGeneration = adminCache.getIdentityGeneration()
     try {
       // La API no permite modificar el stock por PATCH; solo se envían los datos del producto.
       await adminMutation(CATALOG_API, 'PATCH', { id: productToEdit.id, ...parsed.value })
@@ -193,26 +197,9 @@ export default function CatalogoPage() {
       setProductToEdit(null)
       await reloadAfterMutation()
     } catch (error) {
-      showError(error)
+      showError(error, identityGeneration)
     } finally {
       setSaving(false)
-    }
-  }
-
-  const handleDeleteProduct = async () => {
-    if (!productToDeleteId) return
-
-    setSaving(true)
-    try {
-      await adminMutation(CATALOG_API, 'DELETE', { id: productToDeleteId })
-      toast({ title: "Éxito", description: "Producto eliminado correctamente."})
-      await reloadAfterMutation()
-    } catch (error) {
-      showError(error)
-    } finally {
-      setSaving(false)
-      setIsDeleteDialogOpen(false)
-      setProductToDeleteId(null)
     }
   }
 
@@ -221,7 +208,7 @@ export default function CatalogoPage() {
     return <p>Acceso denegado.</p>
   }
 
-  if (loading) {
+  if (loading || (sessionIdentity !== null && dataIdentity !== sessionIdentity && !loadError)) {
     return (
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando catálogo..." size={48} />
@@ -301,7 +288,7 @@ export default function CatalogoPage() {
                       <DropdownMenuContent align="end">
                         <DropdownMenuLabel>Acciones</DropdownMenuLabel>
                         <DropdownMenuItem onSelect={() => handleOpenEditDialog(product)}>Editar</DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600" onSelect={() => handleOpenDeleteDialog(product.id)}>Eliminar</DropdownMenuItem>
+                        <DropdownMenuItem disabled title="La API protege el historial de pedidos.">Eliminación bloqueada por el historial</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>
@@ -407,23 +394,6 @@ export default function CatalogoPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>¿Estás completamente seguro?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Esta acción no se puede deshacer. Esto eliminará permanentemente el producto de la base de datos.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteProduct} disabled={saving} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Eliminar
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }
