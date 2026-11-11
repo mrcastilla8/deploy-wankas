@@ -54,7 +54,7 @@ Comandos ejecutados:
 
 | Aplicación | Comando | Resultado real |
 |---|---|---|
-| Administración | `npm test` | ✅ 113 pruebas CJS + 43 pruebas TypeScript; 156/156 |
+| Administración | `npm test` | ✅ 113 pruebas CJS + 53 pruebas TypeScript; 166/166 en la ejecución final |
 | Administración | `npm run typecheck` | ✅ `tsc --noEmit`, 0 errores |
 | Administración | `npm run lint` | ✅ 0 errores; quedan 5 warnings preexistentes fuera de REC-05 |
 | Administración | `npm run build` con configuración ficticia local de Supabase | ✅ Next 15.5.29; tipos y lint durante build; 17 rutas |
@@ -166,5 +166,6 @@ Esta revalidación parte del SHA auditado `5eab45140783cfa330a1f8337ae928300890e
 - E-commerce: `npm ci` pasó. TypeScript pasó. ESLint: 0 errores y 15 advertencias. Los archivos de test explícitos pasaron 20/20. El comando `node --test tests/` falló en Windows/Node 24.3.0 al interpretar `tests/` como módulo; la ejecución equivalente con los tres archivos enumerados pasó. Build pasó sin variables Supabase de E-commerce, con advertencias de tracing Genkit/handlebars y una dependencia opcional `@opentelemetry/exporter-jaeger` ausente; Genkit se conservó sin actualizar.
 - `npm audit --omit=dev` falló en ambas aplicaciones con 48 vulnerabilidades (22 altas, 25 moderadas, 1 baja, 0 críticas). `npm ci` reportó 71 en el árbol completo (30 altas, 36 moderadas, 4 bajas, 1 crítica), incluyendo dependencias de desarrollo. No se afirma un audit exitoso.
 - No se ejecutó Playwright ni smoke test real. `docs/rec05-e2e-preparacion.md` enumera solo nombres/propósitos/entornos de variables y los procedimientos separados: mutaciones de catálogo interceptadas con fixtures, y smoke solo GET que rechaza escrituras. No se recibió ni inspeccionó secreto alguno; no se tocó Wankas New.
+- Marco verificó en Vercel que los previews de `admin-wankas` y `ecommerce-wankas` para el SHA auditado `ae3d4640e779142507c88645dcbde1b3551d47d6` están ambos `READY` con target Preview. Esta evidencia confirma los previews de ese SHA; no autoriza producción ni resuelve el control de promoción automática a `main`.
 
 Las advertencias de builds, el audit fallido y la ausencia de sesión aislada para navegador quedan como riesgos/bloqueos de validación, sin modificar producción, Vercel, Supabase, RLS ni SQL.

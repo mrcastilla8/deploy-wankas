@@ -49,7 +49,7 @@ test('crear y editar catálogo usan API mock; ninguna escritura llega al servido
   await page.getByRole('menuitem', { name: 'Editar' }).click()
   const editDialog = page.getByRole('dialog')
   await editDialog.getByLabel('Nombre').fill('Producto editado')
-  await editDialog.getByRole('button', { name: 'Guardar Producto' }).click()
+  await editDialog.getByRole('button', { name: 'Actualizar Producto' }).click()
   await expect.poll(() => observedWrites).toContain('PATCH /api/admin/catalogo')
   expect(observedWrites.every(write => write.startsWith('POST /api/admin/catalogo') || write.startsWith('PATCH /api/admin/catalogo'))).toBe(true)
 })
