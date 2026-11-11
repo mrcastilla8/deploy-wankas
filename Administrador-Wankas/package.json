@@ -10,6 +10,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test": "node --test tests/ && tsx --test \"src/**/*.test.ts\"",
     "test:pedidos": "tsx --test src/lib/pedidosState.test.ts"
   },
   "dependencies": {
