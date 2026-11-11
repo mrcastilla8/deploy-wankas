@@ -38,22 +38,8 @@ export default function LoginForm() {
     );
   }
 
-  const validateEmail = (email: string) => {
-    const emailRegex = /^[^\s@]+@(gmail\.com|outlook\.com|hotmail\.com|yahoo\.com|wanka\.com)$/i;
-    return emailRegex.test(email);
-  }
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!validateEmail(email)) {
-      toast({
-        variant: "destructive",
-        title: "Correo inválido",
-        description: "Por favor, utiliza un correo con un dominio válido (ej. gmail, outlook, etc.).",
-      });
-      return;
-    }
 
     const { error } = await login(email, password);
     if (error) {
