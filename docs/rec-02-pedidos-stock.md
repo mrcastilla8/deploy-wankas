@@ -28,6 +28,8 @@ No se modifican RLS, perfiles, roles, endpoints administrativos ni el helper
 | `E-commerce-Wankas/src/context/cart-context.tsx` | DEV-2 | Cantidades enteras y límite por stock |
 | `E-commerce-Wankas/src/components/store-selector.tsx` | DEV-2 | Validación real de sede, slot y fecha |
 | `Administrador-Wankas/src/app/dashboard/pedidos/page.tsx` | DEV-2 | `PATCH /api/admin/pedidos` vía `adminFetch` |
+| `Administrador-Wankas/src/lib/pedidosState.ts` | DEV-2 | Reducer y selectores de identidad/visibilidad |
+| `Administrador-Wankas/src/lib/pedidosState.test.ts` | DEV-2 | Pruebas de cambio de sesión, respuestas tardías y 401/403 |
 | `docs/rec-02-pedidos-stock.md` | DEV-2 | Esta documentación |
 
 ## 3. Contratos SQL
@@ -256,6 +258,14 @@ la compra rechazada. El procedimiento manual sigue en
   ubicaciones y `adminCache`.
 - Cada solicitud lleva un identificador de secuencia y las respuestas pendientes
   de una sesión anterior se descartan; al cambiar de usuario se limpia el estado.
+- **El listado se bloquea en el render, no en un efecto.** El estado vive en
+  `src/lib/pedidosState.ts` y cada pedido queda atado a la identidad
+  (`id:role:location_id`) que lo produjo. `selectVisibleOrders` devuelve `[]`
+  cuando esa identidad no es la de la sesión actual, de modo que un cambio
+  admin → worker nunca pinta datos de la sesión anterior, ni siquiera durante el
+  frame previo a la limpieza. `selectIsOrdersLoading` muestra el loader mientras
+  la identidad no coincida y lo desactiva tras un 401/403.
+- Pruebas: `npm run test:pedidos` (ver `docs/rec-02-evidencias.md`).
 
 ## 8. Coordinación pendiente
 

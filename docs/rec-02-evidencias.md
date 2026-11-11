@@ -20,6 +20,7 @@
 | Migración REC-02 | `exit 0` |
 | T1–T21 | `exit 0` — `== Todas las pruebas SQL de REC-02 pasaron ==` |
 | Concurrencia (2 sesiones) | A confirma; B recibe `23514 / STOCK_INSUFICIENTE`; stock final `0` |
+| Frontend pedidos (`npm run test:pedidos`) | 7 pruebas, `pass 7`, `fail 0` |
 
 ## T1–T21
 
@@ -124,6 +125,38 @@ ROLLBACK
 ```
 
 Solo una compra reservó la última unidad; la otra no dejó pedido ni items.
+
+## Pruebas de frontend (pantalla de pedidos)
+
+`Administrador-Wankas` → `npm run test:pedidos`
+(`tsx --test src/lib/pedidosState.test.ts`, `node:test` + `tsx` ya instalado; sin
+dependencias nuevas y sin cambios en `package-lock.json`).
+
+```text
+ok 1 - admin -> worker: el render no muestra pedidos de la sesion anterior
+ok 2 - respuesta HTTP retrasada no actualiza la pantalla de la sesion nueva
+ok 3 - respuesta retrasada sin solicitud nueva tampoco revive pedidos viejos
+ok 4 - 401/403 limpia pedidos y cache
+ok 5 - tras un 401/403 una solicitud nueva vuelve a mostrar el loader
+ok 6 - un fallo de red deja la lista vacia y no muestra datos viejos
+ok 7 - una respuesta valida de la identidad actual si se muestra
+
+# tests 7
+# pass 7
+# fail 0
+```
+
+Cada prueba ejercita el reducer y los selectores que usa `page.tsx` en
+producción, no una copia:
+
+- **admin → worker:** con pedidos de admin en el estado, el render con identidad
+  worker devuelve `[]` y loader `true` **antes** de que corra el `useEffect` de
+  limpieza.
+- **respuesta retrasada:** la respuesta de la solicitud 1 (admin) se descarta
+  aunque llegue después del cambio de sesión; la respuesta de la solicitud 3
+  (worker) sí se muestra.
+- **401/403:** limpia `orders`, `identity` y `adminCache` (`pedidos`,
+  `ubicaciones`) y no deja el loader activo.
 
 ## Typecheck
 
