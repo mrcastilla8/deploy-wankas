@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { safeInternalRedirect } from '../../src/lib/safeRedirect.ts';
 import { AuthRequestGuard, AuthSessionController } from '../../src/lib/authSessionController.ts';
+import { registerWithSupabase } from '../../src/lib/registrationFlow.ts';
 import { createCatalogResponse, fetchProducts, mapProductRows, ProductCatalogError, ProductCatalogUnavailableError } from '../../src/services/productCatalog.ts';
 
 test('solo acepta rutas internas seguras', () => {
@@ -122,7 +123,41 @@ test('INITIAL_SESSION con sesión y SIGNED_IN hidratan perfil real del controlad
   await settleAuth();
   assert.deepEqual(signedIn.profileCalls, ['nuevo']);
   assert.equal(mountedSignedIn.states.at(-1).user.id, 'nuevo');
+  assert.equal(mountedSignedIn.states.at(-1).user.role, 'customer', 'El rol viene del perfil, no de user_metadata.role=admin');
   mountedSignedIn.dispose();
+});
+
+test('el flujo de registro con doble Supabase distingue sesión activa y confirmación pendiente', async () => {
+  const input = { email: 'cliente@example.test', password: 'contraseña-segura', name: 'Cliente' };
+  const runWithDouble = async data => {
+    const calls = [];
+    const effects = [];
+    const auth = { signUp: async params => { calls.push(params); return { data, error: null }; } };
+    await registerWithSupabase(auth, input, {
+      onAuthenticated: () => effects.push('profile'),
+      onConfirmationRequired: () => effects.push('confirm-email'),
+      onError: error => effects.push(`error:${error.message}`),
+      onUnexpected: () => effects.push('unexpected'),
+    });
+    return { calls, effects };
+  };
+
+  const active = await runWithDouble({ user: { id: 'auth-1' }, session: { access_token: 'fake-access-token' } });
+  assert.deepEqual(active.effects, ['profile']);
+  assert.deepEqual(active.calls, [{ email: input.email, password: input.password, options: { data: { name: input.name } } }]);
+
+  const confirmation = await runWithDouble({ user: { id: 'auth-2' }, session: null });
+  assert.deepEqual(confirmation.effects, ['confirm-email']);
+  assert.deepEqual(confirmation.calls[0].options.data, { name: input.name });
+
+  const failed = [];
+  await registerWithSupabase({ signUp: async () => ({ data: { user: null, session: null }, error: { message: 'invalid email' } }) }, input, {
+    onAuthenticated: () => failed.push('profile'),
+    onConfirmationRequired: () => failed.push('confirm-email'),
+    onError: error => failed.push(`error:${error.message}`),
+    onUnexpected: () => failed.push('unexpected'),
+  });
+  assert.deepEqual(failed, ['error:invalid email']);
 });
 
 test('cambio A → B limpia A de inmediato y la respuesta antigua pendiente no reemplaza B', async () => {
@@ -291,15 +326,16 @@ test('el flujo heredado de Server Actions no existe ni conserva consumidores', a
 
 test('el registro solo envía nombre y los logs Genkit no imprimen entradas', async () => {
   const registration = await readFile(new URL('../../src/components/auth/register-form.tsx', import.meta.url), 'utf8');
-  assert.match(registration, /data:\s*\{\s*name\s*\}/);
-  assert.match(registration, /else if \(data\.session\)/);
-  assert.match(registration, /translations\.registerForm\.confirmEmailTitle/);
-  assert.match(registration, /translations\.registerForm\.confirmEmailDesc/);
-  const confirmationBranch = registration.match(/else if \(data\.user\) \{([\s\S]*?)\n\s*\} else/);
-  assert.ok(confirmationBranch, 'Debe existir el caso de registro que requiere confirmación');
-  assert.match(confirmationBranch[1], /confirmEmailTitle/);
-  assert.match(confirmationBranch[1], /confirmEmailDesc/);
-  assert.doesNotMatch(confirmationBranch[1], /router\.push/);
+  assert.match(registration, /registerWithSupabase\(supabase\.auth,\s*\{\s*email,\s*password,\s*name\s*\}/);
+  assert.match(registration, /onAuthenticated:[\s\S]*?router\.push\('\/profile'\)/);
+  const confirmationHandler = registration.split('onConfirmationRequired:')[1]?.split('onError:')[0];
+  assert.ok(confirmationHandler);
+  assert.match(confirmationHandler, /translations\.registerForm\.confirmEmailTitle/);
+  assert.match(confirmationHandler, /translations\.registerForm\.confirmEmailDesc/);
+  assert.doesNotMatch(confirmationHandler, /router\.push/);
+  const registrationFlow = await readFile(new URL('../../src/lib/registrationFlow.ts', import.meta.url), 'utf8');
+  assert.match(registrationFlow, /options:\s*\{\s*data:\s*\{\s*name:\s*credentials\.name\s*\}\s*\}/);
+  assert.doesNotMatch(registrationFlow, /role\s*:/);
   assert.doesNotMatch(registration, /role\s*:/);
   const english = await readFile(new URL('../../src/locales/en.ts', import.meta.url), 'utf8');
   const spanish = await readFile(new URL('../../src/locales/es.ts', import.meta.url), 'utf8');

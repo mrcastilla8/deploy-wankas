@@ -13,6 +13,7 @@ import { Loader } from '../ui/loader';
 import { UserPlus } from 'lucide-react';
 import { useLocale } from '@/context/locale-context';
 import { supabase } from '@/lib/supabaseClient';
+import { registerWithSupabase } from '@/lib/registrationFlow';
 
 export function RegisterForm() {
   const [name, setName] = useState('');
@@ -48,31 +49,24 @@ export function RegisterForm() {
             return;
         }
 
-        const { data, error } = await supabase.auth.signUp({
-            email,
-            password,
-            options: {
-                data: { name }
-            }
-        });
-
-        if (error) {
-            toast({
-                title: translations.registerForm.dbErrorTitle,
-                description: error.message,
-                variant: 'destructive',
-            });
-        } else if (data.session) {
+        await registerWithSupabase(supabase.auth, { email, password, name }, {
+          onAuthenticated: () => {
             toast({ title: translations.registerForm.registrationSuccessTitle, description: translations.registerForm.registrationSuccessDesc });
             router.push('/profile');
-        } else if (data.user) {
+          },
+          onConfirmationRequired: () => {
             toast({
-                title: translations.registerForm.confirmEmailTitle,
-                description: translations.registerForm.confirmEmailDesc,
+              title: translations.registerForm.confirmEmailTitle,
+              description: translations.registerForm.confirmEmailDesc,
             });
-        } else {
-            toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' });
-        }
+          },
+          onError: error => toast({
+            title: translations.registerForm.dbErrorTitle,
+            description: error.message,
+            variant: 'destructive',
+          }),
+          onUnexpected: () => toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' }),
+        });
     } catch (error) {
         console.error('No se pudo completar el registro.');
         toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' });
