@@ -22,7 +22,7 @@ function imageUrl(item: { thumbnail_url?: string | null; image_urls?: string[] |
 export function mapProductRows(data: any[]): Product[] {
   return data.map((item: any): Product => {
     const category = Array.isArray(item.categories) ? item.categories[0]?.name_es : item.categories?.name_es;
-    if (!item.id || typeof item.name_es !== 'string' || typeof item.price !== 'number' || typeof item.stock !== 'number' || typeof category !== 'string') {
+    if (!item.id || typeof item.name_es !== 'string' || typeof item.price !== 'number' || typeof item.stock !== 'number' || (category !== null && category !== undefined && typeof category !== 'string')) {
       throw new ProductCatalogError('El catálogo contiene un producto con campos obligatorios inválidos.');
     }
     return {
@@ -31,7 +31,7 @@ export function mapProductRows(data: any[]): Product[] {
       description: item.description_es ?? '',
       price: item.price,
       imageUrl: imageUrl(item),
-      category,
+      category: category ?? 'Sin categoría',
       stock: item.stock,
     };
   });

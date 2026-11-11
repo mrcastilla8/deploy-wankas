@@ -7,7 +7,6 @@ let supabase: SupabaseClient;
 
 if (supabaseUrl && supabaseAnonKey) {
   // Use native Supabase localStorage - stable and never hangs.
-  // Cross-app SSO is handled separately via /api/auth/session + Redis.
   supabase = createClient(supabaseUrl, supabaseAnonKey);
 } else {
   console.warn(

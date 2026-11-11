@@ -6,12 +6,12 @@ El callback de `onAuthStateChange` esperaba una consulta de `profiles`, con ries
 
 ## Cambios y arquitectura final
 
-- `E-commerce-Wankas/src/context/auth-context.tsx`: Supabase Auth es la fuente de sesión. El listener es síncrono; programa la hidratación fuera del callback. Un guard de generación descarta lecturas antiguas después de cambios rápidos, logout o desmontaje. Los fallos de perfil dejan el rol informativo en `null`, conservan la sesión válida y terminan la carga. Logout usa `signOut`, mantiene el estado ante fallo, informa con toast y navega a `/login` solo al confirmar.
-- `E-commerce-Wankas/src/lib/authRequestGuard.ts`: guard comprobable de respuestas de perfil asíncronas.
+- `E-commerce-Wankas/src/context/auth-context.tsx` y `src/lib/authSessionController.ts`: Supabase Auth es la fuente de sesión. El listener es síncrono; el controlador difiere la hidratación fuera del callback. El primer `INITIAL_SESSION` se procesa incluso sin sesión y solo se deduplica una repetición del mismo estado. Al cambiar el UUID se invalida el usuario anterior sin esperar la consulta. El guard de generación descarta lecturas antiguas después de cambios rápidos, logout o desmontaje; una rotación de token conserva visible la misma identidad e invalida la lectura previa. Los fallos de perfil dejan el rol informativo en `null`, conservan la sesión válida y terminan la carga. Logout usa `signOut`, mantiene el estado ante fallo, informa con toast y navega a `/login` solo al confirmar.
+- `AuthRequestGuard` se conserva dentro de `authSessionController.ts` y evita aplicar resultados de perfil fuera de generación.
 - `E-commerce-Wankas/src/lib/safeRedirect.ts` y `components/auth/login-form.tsx`: solo permiten rutas internas seguras con fallback `/profile`; tanto sesión existente como login usan el mismo destino validado. La navegación posterior al submit queda en el efecto de sesión.
-- `components/auth/register-form.tsx`: solo usa `signUp` y envía `{ name }`; con sesión va a `/profile`, sin sesión informa que debe confirmar el correo y pasa a `/login`. Los errores no fabrican identidad local.
+- `components/auth/register-form.tsx`: solo usa `signUp` y envía `{ name }`; con sesión va a `/profile`, sin sesión informa que debe confirmar el correo usando `confirmEmailTitle`/`confirmEmailDesc` compatibles con REC-01. Permanece en el formulario y ofrece el enlace normal a `/login`. Los errores no fabrican identidad local.
 - `src/actions/auth.ts`: eliminado después de buscar referencias; no quedan consumidores `registerUser` ni `loginUser`. Coincide con la eliminación prevista por REC-01, aplicada aquí sin copiar su PR ni sus migraciones.
-- `src/services/productService.ts`, `src/services/productCatalog.ts` y `src/app/api/products/route.ts`: retornan filas reales, lista vacía válida o error explícito. No usan productos locales. Los campos obligatorios inválidos producen error; solo la imagen ausente usa placeholder. Los errores del servicio se devuelven como 503 y errores inesperados como 500, sin detalles de conexión. La ruta es dinámica y responde `Cache-Control: no-store`.
+- `src/services/productService.ts`, `src/services/productCatalog.ts` y `src/app/api/products/route.ts`: retornan filas reales, lista vacía válida o error explícito. No usan productos locales. `categories: null` se representa como `Sin categoría`; los demás campos obligatorios inválidos producen error; solo la imagen ausente usa placeholder. Los errores del servicio se devuelven como 503 y errores inesperados como 500, sin detalles de conexión. La ruta es dinámica y responde `Cache-Control: no-store`.
 - `src/app/products/page.tsx`: hace fetch `no-store` al montar y al reintentar, aborta/desestima respuestas tras desmontaje, distingue carga/error/catálogo vacío y conserva búsqueda, filtro y orden. No deduplica por nombre: `id` conserva identidad.
 - `src/lib/clientCache.ts` permanece para usos existentes de perfil/pedidos; el catálogo público ya no lo consulta. No se cambió su TTL ni la caché Redis compartida de pedidos.
 - Los tres flujos Genkit del alcance conservan contratos y prompts; sus registros omiten entrada, prompt, imágenes y contenido del usuario.
@@ -24,7 +24,7 @@ No se modificaron archivos de REC-02: checkout, carrito, pedidos, inventario ni 
 
 ## Pruebas y validación
 
-Pruebas deterministas con Node `node:test` (dobles/lógica local, no integración contra Auth o PostgreSQL):
+Pruebas deterministas con Node `node:test`. La suite instancia `AuthSessionController`, el controlador de ciclo de sesión usado directamente por `AuthProvider`, con un doble controlado del contrato Supabase; no llama Supabase remoto ni monta React:
 
 ```powershell
 cd E-commerce-Wankas
@@ -33,14 +33,13 @@ npm run typecheck
 npm run build
 ```
 
-El conjunto cubre rutas válidas e inválidas, descartar resultados de perfil obsoletos, lista vacía, IDs distintos con el mismo nombre, campos corruptos, propagación de fallos/reintentos, códigos HTTP y `no-store`, eliminación y referencias del sistema heredado, metadata de registro y ausencia de entradas sensibles en logs Genkit. Resultado registrado en esta revisión: 7/7 pruebas aprobadas y `npm run typecheck` aprobado. `npm run build` compiló y generó las páginas; apareció una advertencia de dependencia opcional faltante `@opentelemetry/exporter-jaeger` desde Genkit/Opentelemetry.
+El conjunto cubre `INITIAL_SESSION` sin sesión, con sesión, duplicado y cambio tardío a sesión; `SIGNED_IN`, cambio A→B con consulta pendiente, `SIGNED_OUT`, refresh de token de la misma cuenta, error de lectura de perfil, fallo de `signOut`, logout con lectura pendiente y desmontaje con lectura pendiente. También cubre rutas de redirección, categoría nula incluida en la respuesta HTTP, lista vacía, IDs distintos con nombre repetido, corrupción, propagación de errores/reintentos, códigos HTTP/`no-store`, flujo heredado, metadatos del registro y logs Genkit. Resultado registrado: 14/14 pruebas aprobadas, `npm run typecheck` aprobado y `npm run build` aprobado con todas las páginas generadas. El build emite advertencia del grafo Genkit/Opentelemetry por falta de la dependencia opcional `@opentelemetry/exporter-jaeger`; no impide la compilación.
 
-No se ejecutaron pruebas de integración con Supabase Auth/PostgreSQL, correos de confirmación, login correcto/incorrecto, consultas de catálogo contra la base ni una sesión con rol alterado. Tampoco se montó el `AuthProvider` con un SDK simulado: la prueba local cubre el guard de generación, no el despacho real de eventos del proveedor. Quedan pendientes en una instancia aislada:
+No se ejecutaron pruebas contra Supabase Auth/PostgreSQL real, correos de confirmación reales, login remoto, consultas de catálogo contra la base ni una sesión PostgreSQL con rol alterado. El doble local valida el controlador usado por el proveedor, pero no prueba el cableado de React ni SDK/servicios remotos. Quedan pendientes en una instancia aislada:
 
-- Login correcto/incorrecto y transiciones de refresh, `SIGNED_IN`, `SIGNED_OUT`, `INITIAL_SESSION` duplicado y cambio rápido de identidad.
-- Logout confirmado y fallido, logout durante una consulta pendiente, desmontaje durante hidratación y confirmación de que cada ruta finaliza `isLoading`.
-- Registro simulado con sesión, sin sesión y error; trigger de perfil `customer`; confirmación y login normal; cambio de `user_metadata.role` a `admin`/`worker` sin elevar el rol PostgreSQL.
-- Cliente Supabase no configurado y consulta real con cambio de producto visible después de una nueva carga.
+- Login correcto/incorrecto y ciclo de confirmación/login dentro de un proyecto Supabase aislado.
+- Trigger integrado que crea `customer` y prueba de `user_metadata.role` alterado sin cambiar el rol confiable PostgreSQL.
+- Cliente Supabase no configurado y actualización real del catálogo visible después de una nueva carga conectada a la base.
 
 Estas comprobaciones dependen de una instancia de prueba y credenciales aisladas; no se usaron credenciales remotas ni se cambió Supabase. Tampoco se afirma que el trigger de REC-01 esté desplegado.
 
@@ -48,7 +47,7 @@ Estas comprobaciones dependen de una instancia de prueba y credenciales aisladas
 
 Los cambios se limitan a módulos REC-04, helper nuevo, pruebas y esta documentación. No se tocaron `package.json`, lockfile, Next/TypeScript config, el header, módulos comerciales o transaccionales, aplicación administrativa, SQL ni configuraciones de producción.
 
-Riesgos verificables: confirmar en el entorno de integración que el trigger de REC-01 esté aplicado antes de dar por garantizado `profiles.id = auth.users.id`; la lectura de catálogo presupone que cada fila tiene categoría y precio/stock numéricos válidos; y el build local muestra la dependencia opcional Jaeger ausente. El formulario usa `/login` como paso después de registro sin sesión, donde el usuario puede iniciar sesión tras confirmar el correo.
+Riesgos verificables: confirmar en el entorno de integración que el trigger de REC-01 esté aplicado antes de dar por garantizado `profiles.id = auth.users.id`; la lectura de catálogo presupone precio y stock numéricos válidos; el build local advierte que falta la dependencia opcional Jaeger. El alta sin sesión deja al usuario en registro con el aviso de confirmación y el enlace usual a login.
 
 ## Verificación posterior a la integración
 

@@ -62,15 +62,14 @@ export function RegisterForm() {
                 description: error.message,
                 variant: 'destructive',
             });
-        } else if (data.user && data.session) {
+        } else if (data.session) {
             toast({ title: translations.registerForm.registrationSuccessTitle, description: translations.registerForm.registrationSuccessDesc });
             router.push('/profile');
         } else if (data.user) {
             toast({
-                title: translations.registerForm.registrationSuccessTitle,
-                description: 'Tu cuenta fue creada. Confirma tu correo electrónico y luego inicia sesión.',
+                title: translations.registerForm.confirmEmailTitle,
+                description: translations.registerForm.confirmEmailDesc,
             });
-            router.push('/login');
         } else {
             toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' });
         }
