@@ -94,8 +94,8 @@ export default function ProfilePage() {
       } : history);
       
       return true;
-    } catch (error: any) {
-      toast({ title: translations.common.error, description: error.message || translations.profilePage.orderCancellationFailedDesc, variant: 'destructive' });
+    } catch (error: unknown) {
+      toast({ title: translations.common.error, description: error instanceof Error ? error.message : translations.profilePage.orderCancellationFailedDesc, variant: 'destructive' });
       return false;
     }
   };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, access } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { safeInternalRedirect } from '../../src/lib/safeRedirect.ts';
 import { AuthRequestGuard, AuthSessionController } from '../../src/lib/authSessionController.ts';
@@ -319,9 +319,19 @@ test('la API distingue catálogo vacío, dependencia no disponible y fallo inter
 test('el flujo heredado de Server Actions no existe ni conserva consumidores', async () => {
   await assert.rejects(access(new URL('../../src/actions/auth.ts', import.meta.url)));
   const root = fileURLToPath(new URL('../../src/', import.meta.url));
-  const search = spawnSync('rg', ['-n', 'registerUser|loginUser|actions/auth', root], { encoding: 'utf8' });
-  assert.equal(search.error, undefined, `No se pudo ejecutar rg: ${search.error?.message}`);
-  assert.equal(search.status, 1, `La búsqueda encontró referencias o falló: ${search.stdout}${search.stderr}`);
+  const references = [];
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) await visit(path);
+      else if (/\.(?:[cm]?[jt]sx?)$/.test(entry.name)) {
+        const source = await readFile(path, 'utf8');
+        if (/registerUser|loginUser|actions\/auth/.test(source)) references.push(path);
+      }
+    }
+  }
+  await visit(root);
+  assert.deepEqual(references, [], `Se encontraron consumidores heredados: ${references.join(', ')}`);
 });
 
 test('el registro solo envía nombre y los logs Genkit no imprimen entradas', async () => {

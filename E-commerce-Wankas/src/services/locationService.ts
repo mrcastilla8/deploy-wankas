@@ -1,4 +1,4 @@
-import type { StoreLocation, TimeSlot } from '@/types';
+import type { StoreLocation } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import { timeSlots as hardcodedTimeSlots } from '@/data/stores';
 
@@ -38,7 +38,7 @@ export async function getStoreLocations(): Promise<StoreLocation[]> {
 
     console.log("Store locations fetched from Supabase:", data.length);
 
-    const locations: StoreLocation[] = data.map((item: any) => {
+    const locations: StoreLocation[] = data.map((item) => {
       const operatingHours = typeof item.opening_hours_es === 'string' 
         ? item.opening_hours_es 
         : JSON.stringify(item.opening_hours_es);

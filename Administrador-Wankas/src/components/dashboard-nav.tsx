@@ -51,7 +51,7 @@ export function DashboardNav() {
     <>
       <SidebarHeader>
         <div className="flex items-center gap-3 p-2">
-            <h1 className="font-headline text-2xl font-bold text-primary">Wanka's</h1>
+            <h1 className="font-headline text-2xl font-bold text-primary">Wanka&apos;s</h1>
         </div>
       </SidebarHeader>
 

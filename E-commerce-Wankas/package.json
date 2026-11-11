@@ -8,7 +8,7 @@
     "genkit:watch": "genkit start -- tsx --watch src/ai/dev.ts",
     "build": "npx next build",
     "start": "npx next start",
-    "lint": "npx next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -44,9 +44,9 @@
     "genkit": "^1.8.0",
     "html2canvas": "^1.4.1",
     "ioredis": "^5.11.1",
-    "jspdf": "^2.5.1",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.475.0",
-    "next": "15.3.8",
+    "next": "15.5.29",
     "nextjs-toploader": "^3.9.17",
     "patch-package": "^8.0.0",
     "react": "^18.3.1",
@@ -59,10 +59,13 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.29",
     "genkit-cli": "^1.8.0",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",

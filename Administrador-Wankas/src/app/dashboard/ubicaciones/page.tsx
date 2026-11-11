@@ -4,8 +4,8 @@
 import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
 import type { Location } from "@/types"
-import { createClient } from "@/lib/supabase/client"
 import { adminCache } from "@/lib/adminCache"
+import { AdminApiError, adminMutation, adminRequest, describeAdminError } from "@/lib/adminApi"
 import { Loader } from "@/components/ui/loader"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -32,34 +32,30 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { MoreHorizontal, PlusCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 
+// Proyección que devuelve GET /api/admin/ubicaciones (REC-03).
+type AdminLocation = Pick<Location, 'id' | 'name_es' | 'address'>
+
+const LOCATIONS_API = '/api/admin/ubicaciones'
+
 export default function UbicacionesPage() {
   const { user } = useAuth()
+  const sessionIdentity = user ? `${user.id}:${user.role}:${user.location_id ?? ''}` : null
   const { toast } = useToast()
-  const [locations, setLocations] = React.useState<Location[]>([])
+  const [locations, setLocations] = React.useState<AdminLocation[]>([])
   const [loading, setLoading] = React.useState(true)
-  const supabase = createClient()
+  const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [dataIdentity, setDataIdentity] = React.useState<string | null>(null)
+  const [saving, setSaving] = React.useState(false)
 
   const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false)
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false)
 
-  const [locationToEdit, setLocationToEdit] = React.useState<Location | null>(null)
-  const [locationToDeleteId, setLocationToDeleteId] = React.useState<string | null>(null)
+  const [locationToEdit, setLocationToEdit] = React.useState<AdminLocation | null>(null)
 
   const [formData, setFormData] = React.useState({
     name_es: "",
@@ -67,31 +63,61 @@ export default function UbicacionesPage() {
   })
 
   const fetchLocations = React.useCallback(async (forceRefresh = false) => {
+    const requestGeneration = adminCache.getGeneration()
+    const requestIdentity = adminCache.getIdentity()
+    const identityGeneration = adminCache.getIdentityGeneration()
+    let authErrorForCurrentIdentity = false
     if (!forceRefresh) {
-      const cached = adminCache.get<Location[]>('ubicaciones')
+      const cached = adminCache.get<AdminLocation[]>('ubicaciones')
       if (cached) {
         setLocations(cached)
+        setDataIdentity(sessionIdentity)
+        setLoadError(null)
         setLoading(false)
         return
       }
     }
     setLoading(true)
     try {
-      const res = await fetch('/api/admin/ubicaciones')
-      const data = await res.json()
-      adminCache.set('ubicaciones', data)
+      const data = await adminRequest<AdminLocation[]>(LOCATIONS_API)
+      if (!adminCache.isCurrent(requestGeneration)) return
+      adminCache.set('ubicaciones', data, requestGeneration)
       setLocations(data)
-    } catch (e) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudieron cargar las ubicaciones."})
-      console.error(e)
+      setDataIdentity(sessionIdentity)
+      setLoadError(null)
+    } catch (error) {
+      authErrorForCurrentIdentity = error instanceof AdminApiError && error.isAuthError
+        && adminCache.hasIdentity(requestIdentity)
+        && adminCache.isSameIdentityGeneration(identityGeneration)
+      if (!adminCache.isCurrent(requestGeneration) && !authErrorForCurrentIdentity) return
+      // No se muestran datos anteriores ni una lista vacía como si fuera real.
+      adminCache.invalidate('ubicaciones')
+      setLocations([])
+      setDataIdentity(sessionIdentity)
+      setLoadError(describeAdminError(error))
     } finally {
-      setLoading(false)
+      if (adminCache.isCurrent(requestGeneration) || authErrorForCurrentIdentity) setLoading(false)
     }
+  }, [sessionIdentity])
+
+  const reloadAfterMutation = React.useCallback(() => {
+    adminCache.invalidate('ubicaciones')
+    return fetchLocations(true)
+  }, [fetchLocations])
+
+  const showError = React.useCallback((error: unknown, identityGeneration: number) => {
+    if (error instanceof AdminApiError && error.isAuthError && adminCache.isSameIdentityGeneration(identityGeneration)) {
+      setLocations([])
+      setLoadError(describeAdminError(error))
+    }
+    toast({ variant: "destructive", title: "Error", description: describeAdminError(error) })
   }, [toast])
+
+  const readForm = () => ({ name_es: formData.name_es.trim(), address: formData.address.trim() })
 
   React.useEffect(() => {
     fetchLocations()
-  }, [fetchLocations])
+  }, [fetchLocations, user?.id, user?.role, user?.location_id])
 
   const handleFormChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { id, value } = e.target;
@@ -103,7 +129,7 @@ export default function UbicacionesPage() {
     setIsAddDialogOpen(true)
   }
 
-  const handleOpenEditDialog = (location: Location) => {
+  const handleOpenEditDialog = (location: AdminLocation) => {
     setLocationToEdit(location)
     setFormData({
       name_es: location.name_es,
@@ -112,33 +138,26 @@ export default function UbicacionesPage() {
     setIsEditDialogOpen(true)
   }
 
-  const handleOpenDeleteDialog = (locationId: string) => {
-    setLocationToDeleteId(locationId)
-    setIsDeleteDialogOpen(true)
-  }
-  
   const handleSaveLocation = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { name_es, address } = formData;
-    
-    if (!name_es || !address) {
+    const body = readForm()
+
+    if (!body.name_es || !body.address) {
         toast({ variant: "destructive", title: "Error", description: "Por favor, rellena todos los campos."})
         return
     }
 
-    const { error } = await supabase.from('locations').insert({
-      name_es,
-      address,
-    })
-
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo guardar la ubicación."})
-      console.error(error)
-    } else {
+    setSaving(true)
+    const identityGeneration = adminCache.getIdentityGeneration()
+    try {
+      await adminMutation(LOCATIONS_API, 'POST', body)
       toast({ title: "Éxito", description: "Ubicación añadida correctamente."})
       setIsAddDialogOpen(false)
-      adminCache.invalidate('ubicaciones')
-      fetchLocations(true)
+      await reloadAfterMutation()
+    } catch (error) {
+      showError(error, identityGeneration)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -146,50 +165,50 @@ export default function UbicacionesPage() {
     e.preventDefault()
     if (!locationToEdit) return
 
-    const { name_es, address } = formData;
-    const { error } = await supabase.from('locations').update({
-      name_es,
-      address,
-    }).eq('id', locationToEdit.id)
+    const body = readForm()
+    if (!body.name_es || !body.address) {
+        toast({ variant: "destructive", title: "Error", description: "Por favor, rellena todos los campos."})
+        return
+    }
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo actualizar la ubicación."})
-      console.error(error)
-    } else {
+    setSaving(true)
+    const identityGeneration = adminCache.getIdentityGeneration()
+    try {
+      await adminMutation(LOCATIONS_API, 'PATCH', { id: locationToEdit.id, ...body })
       toast({ title: "Éxito", description: "Ubicación actualizada correctamente."})
       setIsEditDialogOpen(false)
       setLocationToEdit(null)
-      adminCache.invalidate('ubicaciones')
-      fetchLocations(true)
+      await reloadAfterMutation()
+    } catch (error) {
+      showError(error, identityGeneration)
+    } finally {
+      setSaving(false)
     }
-  }
-
-  const handleDeleteLocation = async () => {
-    if (!locationToDeleteId) return
-
-    const { error } = await supabase.from('locations').delete().eq('id', locationToDeleteId)
-    
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudo eliminar la ubicación."})
-      console.error(error)
-    } else {
-      toast({ title: "Éxito", description: "Ubicación eliminada correctamente."})
-      adminCache.invalidate('ubicaciones')
-      fetchLocations(true)
-    }
-    setIsDeleteDialogOpen(false)
-    setLocationToDeleteId(null)
   }
 
   if (user?.role !== 'admin') {
     return <p>Acceso denegado.</p>
   }
   
-  if (loading) {
+  if (loading || (sessionIdentity !== null && dataIdentity !== sessionIdentity && !loadError)) {
     return (
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando ubicaciones..." size={48} />
       </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>No se pudieron cargar las ubicaciones</CardTitle>
+          <CardDescription>{loadError}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={() => fetchLocations(true)}>Reintentar</Button>
+        </CardContent>
+      </Card>
     )
   }
 
@@ -245,7 +264,7 @@ export default function UbicacionesPage() {
                       <DropdownMenuContent align="end">
                         <DropdownMenuLabel>Acciones</DropdownMenuLabel>
                         <DropdownMenuItem onSelect={() => handleOpenEditDialog(location)}>Editar</DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600" onSelect={() => handleOpenDeleteDialog(location.id)}>Eliminar</DropdownMenuItem>
+                        <DropdownMenuItem disabled title="La API protege las relaciones e integridad de sedes.">Eliminación bloqueada por integridad</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>
@@ -277,7 +296,7 @@ export default function UbicacionesPage() {
                     </div>
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Guardar Ubicación</Button>
+                    <Button type="submit" disabled={saving}>Guardar Ubicación</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
@@ -304,29 +323,12 @@ export default function UbicacionesPage() {
                     </div>
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Actualizar Ubicación</Button>
+                    <Button type="submit" disabled={saving}>Actualizar Ubicación</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>¿Estás completamente seguro?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Esta acción no se puede deshacer. Esto eliminará permanentemente la ubicación de la base de datos.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteLocation} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Eliminar
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

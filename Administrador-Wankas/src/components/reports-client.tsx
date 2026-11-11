@@ -1,18 +1,20 @@
 
 "use client"
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import autoTable, { type UserOptions } from 'jspdf-autotable';
 import { useAuth } from '@/hooks/use-auth';
-import { createClient } from '@/lib/supabase/client';
+import { adminRequest, describeAdminError } from '@/lib/adminApi';
+import { canExportReport, ReportRequestGate } from '@/lib/reportRequestState';
+import { parseReportPayload, type ReportOrder, type ReportProduct } from '@/lib/reportPayload';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, type TooltipProps } from 'recharts';
+import type { NameType, ValueType } from 'recharts/types/component/DefaultTooltipContent';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import type { Order, Product, Location as LocationType } from '@/types';
 import { Download, DollarSign, ShoppingCart, Package, TrendingUp, BarChart2 } from 'lucide-react';
 import { format, parseISO, isWithinInterval, startOfMonth, endOfMonth, subMonths, subDays, endOfDay as dateFnsEndOfDay } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -34,16 +36,19 @@ const getTimeRange = (range: string): { start: Date, end: Date } => {
     }
 };
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+// jspdf-autotable guarda la posición final de la última tabla en el documento, sin tiparla.
+type JsPdfWithAutoTable = jsPDF & { lastAutoTable: { finalY: number } };
+
+const CustomTooltip = ({ active, payload, label }: TooltipProps<ValueType, NameType>) => {
     if (active && payload && payload.length) {
       return (
         <div className="p-2 bg-background/90 border border-border rounded-lg shadow-lg text-sm">
           <p className="label font-bold mb-1">{label}</p>
-          {payload.map((pld: any, index: number) => (
+          {payload.map((pld, index) => (
             <p key={index} style={{ color: pld.color }} className="flex items-center">
               <span className="mr-2">{pld.name}:</span>
               <span className="font-semibold">
-                {pld.dataKey.toLowerCase().includes('ventas') || pld.dataKey.toLowerCase().includes('ticketpromedio') 
+                {String(pld.dataKey).toLowerCase().includes('ventas') || String(pld.dataKey).toLowerCase().includes('ticketpromedio')
                 ? `S/ ${Number(pld.value).toFixed(2)}` 
                 : pld.value}
               </span>
@@ -67,41 +72,62 @@ const renderEmptyState = (message: string, description: string, height: number =
 
 export default function ReportsClient() {
     const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
+    const hasUser = Boolean(user?.id);
     const [activeTab, setActiveTab] = useState('sales');
     const [timeRange, setTimeRange] = useState('30d');
     
-    const [orders, setOrders] = useState<Order[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
-    const [locations, setLocations] = useState<LocationType[]>([]);
+    const [orders, setOrders] = useState<ReportOrder[]>([]);
+    const [products, setProducts] = useState<ReportProduct[]>([]);
     const [loading, setLoading] = useState(true);
-    const supabase = createClient();
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [loaded, setLoaded] = useState(false);
+    const requestGeneration = useRef(new ReportRequestGate());
+    const currentIdentity = user ? `${user.id}:${user.role}:${user.location_id ?? ''}` : null;
+    const requestIdentity = useRef<string | null>(null);
+    const [dataIdentity, setDataIdentity] = useState<string | null>(null);
 
     const fetchReportData = useCallback(async () => {
+        const generation = requestGeneration.current.begin();
+        const identity = requestIdentity.current;
         setLoading(true);
-        const { data: ordersData, error: ordersError } = await supabase
-            .from('orders')
-            .select('*, order_items(*, products(*, categories(*))), locations(*)');
-        
-        const { data: productsData, error: productsError } = await supabase.from('products').select('*');
-        const { data: locationsData, error: locationsError } = await supabase.from('locations').select('*');
-
-        if (ordersError || productsError || locationsError) {
-            console.error("Error fetching report data:", ordersError || productsError || locationsError);
-        } else {
-            setOrders(ordersData as any);
-            setProducts(productsData || []);
-            setLocations(locationsData || []);
+        setLoadError(null);
+        setLoaded(false);
+        try {
+            const response = await adminRequest<unknown>('/api/admin/informes');
+            const data = parseReportPayload(response);
+            if (!requestGeneration.current.isCurrent(generation)) return;
+            setOrders(data.orders);
+            setProducts(data.products);
+            setDataIdentity(identity);
+            setLoaded(true);
+        } catch (error) {
+            if (!requestGeneration.current.isCurrent(generation)) return;
+            setOrders([]);
+            setProducts([]);
+            setDataIdentity(null);
+            setLoadError(describeAdminError(error));
+        } finally {
+            if (requestGeneration.current.isCurrent(generation)) setLoading(false);
         }
-        setLoading(false);
-    }, [supabase]);
+    }, []);
 
     useEffect(() => {
-        if (user?.role === 'admin') {
+        const gate = requestGeneration.current;
+        if (isAdmin) {
+            requestIdentity.current = currentIdentity;
             fetchReportData();
         } else {
+            gate.invalidate();
+            setOrders([]);
+            setProducts([]);
+            setDataIdentity(null);
+            setLoaded(false);
+            setLoadError(hasUser ? 'No tienes permisos para consultar los informes.' : null);
             setLoading(false);
         }
-    }, [user, fetchReportData]);
+        return () => { gate.invalidate(); };
+    }, [currentIdentity, isAdmin, hasUser, fetchReportData]);
 
     const filteredOrders = useMemo(() => {
         if (!orders) return [];
@@ -111,7 +137,7 @@ export default function ReportsClient() {
             try {
                 const orderDate = parseISO(o.order_date);
                 return isWithinInterval(orderDate, { start, end });
-            } catch (error) {
+            } catch {
                 console.warn(`Invalid date format for order ${o.id}: ${o.order_date}`);
                 return false;
             }
@@ -131,7 +157,7 @@ export default function ReportsClient() {
                 if (!acc[day]) acc[day] = { date: day, ventas: 0, pedidos: 0 };
                 acc[day].ventas += order.total_price || 0;
                 acc[day].pedidos += 1;
-            } catch (e) { }
+            } catch { }
             return acc;
         }, {} as Record<string, { date: string, ventas: number, pedidos: number }>);
         
@@ -194,7 +220,7 @@ export default function ReportsClient() {
     }, [products]);
     
     const handleDownloadPdf = () => {
-        const doc = new jsPDF();
+        const doc = new jsPDF() as JsPdfWithAutoTable;
         const timeRangeText = {
             '7d': 'Últimos 7 días',
             '30d': 'Últimos 30 días',
@@ -212,7 +238,7 @@ export default function ReportsClient() {
         doc.text(`Período: ${timeRangeText}`, 14, 30);
         
         let finalY = 35;
-        const tableOptions = {
+        const tableOptions: Pick<UserOptions, 'theme' | 'headStyles' | 'styles'> = {
             theme: 'grid',
             headStyles: { fillColor: '#8B4513' }, 
             styles: { font: 'helvetica', cellPadding: 2, fontSize: 9 },
@@ -232,7 +258,7 @@ export default function ReportsClient() {
                 ['Ticket Promedio', `S/ ${salesReportData.averageTicket.toFixed(2)}`],
             ],
         });
-        finalY = (doc as any).lastAutoTable.finalY;
+        finalY = doc.lastAutoTable.finalY;
 
         if (categoryReportData.topCategories.length > 0 || categoryReportData.topProducts.length > 0) {
             doc.setFontSize(14);
@@ -246,7 +272,7 @@ export default function ReportsClient() {
                     head: [['Top 5 Categorías por Ventas', 'Ventas (S/)']],
                     body: categoryReportData.topCategories.map(c => [c.name, `S/ ${c.ventas.toFixed(2)}`]),
                 });
-                finalY = (doc as any).lastAutoTable.finalY;
+                finalY = doc.lastAutoTable.finalY;
             }
 
             if (categoryReportData.topProducts.length > 0) {
@@ -256,7 +282,7 @@ export default function ReportsClient() {
                     body: categoryReportData.topProducts.map(p => [p.name, p.cantidad]),
                     startY: finalY + 10
                 });
-                finalY = (doc as any).lastAutoTable.finalY;
+                finalY = doc.lastAutoTable.finalY;
             }
         }
 
@@ -274,7 +300,7 @@ export default function ReportsClient() {
                     `S/ ${l.ticketPromedio.toFixed(2)}`
                 ]),
             });
-            finalY = (doc as any).lastAutoTable.finalY;
+            finalY = doc.lastAutoTable.finalY;
         }
 
          if (stockReportData.length > 0) {
@@ -295,12 +321,22 @@ export default function ReportsClient() {
       return <p>Acceso denegado.</p>;
     }
   
-    if (loading) {
+    if (loading || (isAdmin && dataIdentity !== currentIdentity && !loadError)) {
       return <p>Cargando informes...</p>;
     }
 
+    if (loadError || !loaded) {
+      return <div role="alert" className="space-y-3 rounded-md border p-4">
+        <p>{loadError ?? 'No se pudieron validar los datos del informe.'}</p>
+        <Button onClick={fetchReportData}>Reintentar</Button>
+      </div>;
+    }
+
+    const hasNoSourceData = orders.length === 0 && products.length === 0;
+
     return (
         <div className="space-y-6">
+            {hasNoSourceData && <p role="status" className="rounded-md border p-4 text-muted-foreground">La API confirmó que no hay pedidos ni productos registrados.</p>}
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                 <Select value={timeRange} onValueChange={setTimeRange}>
                     <SelectTrigger className="w-full sm:w-[180px]">
@@ -312,7 +348,7 @@ export default function ReportsClient() {
                         <SelectItem value="lastMonth">Mes pasado</SelectItem>
                     </SelectContent>
                 </Select>
-                <Button onClick={handleDownloadPdf} className="bg-accent text-accent-foreground hover:bg-accent/90 w-full sm:w-auto">
+                <Button disabled={!canExportReport(loaded, loading)} onClick={handleDownloadPdf} className="bg-accent text-accent-foreground hover:bg-accent/90 w-full sm:w-auto">
                     <Download className="mr-2 h-4 w-4" />
                     Generar Informe PDF
                 </Button>

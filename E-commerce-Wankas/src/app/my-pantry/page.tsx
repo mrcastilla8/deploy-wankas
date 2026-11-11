@@ -345,7 +345,7 @@ export default function MyPantryPage() {
     const scaleFactor = newServings / originalServings;
 
     return ingredient.replace(/^(\d+(\.\d+)?|\d+\s*\/\s*\d+|\d+)\s*/, (match) => {
-      let quantityStr = match.trim();
+      const quantityStr = match.trim();
       let quantity: number;
 
       if (quantityStr.includes('/')) { 
