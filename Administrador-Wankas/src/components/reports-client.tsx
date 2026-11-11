@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import autoTable, { type UserOptions } from 'jspdf-autotable';
 import { useAuth } from '@/hooks/use-auth';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
@@ -212,7 +212,7 @@ export default function ReportsClient() {
         doc.text(`Período: ${timeRangeText}`, 14, 30);
         
         let finalY = 35;
-        const tableOptions = {
+        const tableOptions: Pick<UserOptions, 'theme' | 'headStyles' | 'styles'> = {
             theme: 'grid',
             headStyles: { fillColor: '#8B4513' }, 
             styles: { font: 'helvetica', cellPadding: 2, fontSize: 9 },
