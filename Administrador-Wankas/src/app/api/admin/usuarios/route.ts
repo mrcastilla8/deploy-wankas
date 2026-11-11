@@ -234,7 +234,9 @@ export async function PATCH(request: Request) {
 
     if (Object.keys(changes).length > 0) {
       // An assignment without a role change must still target a worker at write time.
-      const guard = changes.location_id != null && changes.role === undefined ? { role: 'worker' } : undefined;
+      const guard: ProfileGuard | undefined = changes.location_id != null && changes.role === undefined
+        ? { role: 'worker' }
+        : undefined;
       const profileError = await persistProfile(supabase, id, changes, { guard });
       if (profileError) {
         return emailChanged ? fail(profileError.status, 'USER_PROFILE_UPDATE_FAILED_AFTER_EMAIL_CHANGE') : profileError;
