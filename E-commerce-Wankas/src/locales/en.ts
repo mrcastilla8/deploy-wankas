@@ -169,6 +169,8 @@ export const en = {
     passwordMismatch: "Passwords do not match.",
     registrationSuccessTitle: "Registration Successful!",
     registrationSuccessDesc: "Your profile has been created. Welcome to Wanka's!",
+    confirmEmailTitle: "Confirm your email address",
+    confirmEmailDesc: "Check your inbox and confirm your email before signing in.",
     dbErrorTitle: "Registration Error",
     dbErrorPrefix: "Could not save profile:",
     dbErrorDefault: "Could not create account. Please try again.",

@@ -19,6 +19,25 @@ interface StoreSelectorProps {
   onSelectionChange: (selection: { timeSlotId: string; pickupDate: Date } | null) => void;
 }
 
+function parseSlotStart(timeRange: string, date: Date): Date | null {
+  const startTimeString = timeRange.split(' - ')[0];
+  if (!startTimeString) return null;
+
+  const slotTime = new Date(date);
+  const [time, modifier] = startTimeString.trim().split(' ');
+  if (!time) return null;
+
+  const [hoursRaw, minutesRaw] = time.split(':').map(Number);
+  if (!Number.isFinite(hoursRaw) || !Number.isFinite(minutesRaw)) return null;
+
+  let hours = hoursRaw;
+  if (modifier === 'PM' && hours < 12) hours += 12;
+  if (modifier === 'AM' && hours === 12) hours = 0;
+
+  slotTime.setHours(hours, minutesRaw, 0, 0);
+  return slotTime;
+}
+
 export function StoreSelector({ 
   selectedStoreId, 
   onStoreSelect,
@@ -67,29 +86,25 @@ export function StoreSelector({
 
     const now = new Date();
     const dayOfWeek = now.getDay();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    const parseStartTime = (timeRange: string, date: Date): Date => {
-      const startTimeString = timeRange.split(' - ')[0];
-      const slotTime = new Date(date);
-      const [time, modifier] = startTimeString.split(' ');
-      let [hours, minutes] = time.split(':').map(Number);
-      if (modifier === 'PM' && hours < 12) hours += 12;
-      if (modifier === 'AM' && hours === 12) hours = 0;
-      slotTime.setHours(hours, minutes, 0, 0);
-      return slotTime;
-    };
-    
-    const todaysFutureSlots = allTimeSlots.filter(slot => slot.available && parseStartTime(slot.time, now) > now);
-    
-    let baseDate = new Date(now);
+    const todaysFutureSlots = allTimeSlots.filter(slot => {
+      const start = parseSlotStart(slot.time, todayStart);
+      return slot.available && start !== null && start.getTime() > now.getTime();
+    });
+
+    let baseDate = new Date(todayStart);
     let message = '';
     let slotsToDisplay: (TimeSlot & { isDisabled?: boolean })[] = [...allTimeSlots];
 
     if (todaysFutureSlots.length > 0) {
-      slotsToDisplay = slotsToDisplay.map(slot => ({
-        ...slot,
-        isDisabled: !(slot.available && parseStartTime(slot.time, now) > now)
-      }));
+      slotsToDisplay = slotsToDisplay.map(slot => {
+        const start = parseSlotStart(slot.time, todayStart);
+        return {
+          ...slot,
+          isDisabled: !(slot.available && start !== null && start.getTime() > now.getTime()),
+        };
+      });
     } else {
       let daysToAdd = 1;
       if (dayOfWeek === 6) {
@@ -101,8 +116,9 @@ export function StoreSelector({
       } else {
           message = translations.storeSelector.slotsForTomorrow;
       }
-      baseDate.setDate(now.getDate() + daysToAdd);
-      
+
+      baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToAdd);
+
       slotsToDisplay = slotsToDisplay.map(slot => ({ ...slot, isDisabled: !slot.available }));
     }
 
@@ -110,11 +126,21 @@ export function StoreSelector({
   }, [allTimeSlots, isLoadingTimeSlots, translations]);
 
   const handleTimeSlotChange = (timeSlotId: string) => {
-    if (displayConfig.baseDate) {
-      onSelectionChange({ timeSlotId, pickupDate: displayConfig.baseDate });
-    } else {
+    const slot = displayConfig.slots.find(candidate => candidate.id === timeSlotId);
+
+    if (!slot || slot.isDisabled) {
       onSelectionChange(null);
+      return;
     }
+
+    const start = parseSlotStart(slot.time, displayConfig.baseDate);
+
+    if (!start || start.getTime() <= Date.now()) {
+      onSelectionChange(null);
+      return;
+    }
+
+    onSelectionChange({ timeSlotId, pickupDate: displayConfig.baseDate });
   };
 
   const selectedStoreDetails = storeLocations.find(s => s.id === selectedStoreId);

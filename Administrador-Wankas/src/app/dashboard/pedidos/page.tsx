@@ -5,8 +5,17 @@ import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
 import type { Order, OrderStatus, Location } from "@/types"
 import { orderStatusToSpanish, spanishToOrderStatus } from "@/types"
-import { createClient } from "@/lib/supabase/client"
+import { adminFetch } from "@/lib/adminFetch"
 import { adminCache } from "@/lib/adminCache"
+import {
+  createRequestSequencer,
+  initialOrdersState,
+  isSameSession,
+  ordersReducer,
+  selectIsOrdersLoading,
+  selectVisibleOrders,
+  type RequestSequencer,
+} from "@/lib/pedidosState"
 import { Loader } from "@/components/ui/loader"
 import { format, parseISO } from "date-fns"
 import { es } from 'date-fns/locale'
@@ -55,68 +64,199 @@ import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 
 export default function PedidosPage() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
-  const [orders, setOrders] = React.useState<Order[]>([])
+  const [ordersState, dispatchOrders] = React.useReducer(
+    ordersReducer<Order>,
+    initialOrdersState<Order>()
+  )
   const [locations, setLocations] = React.useState<Location[]>([])
-  const [loading, setLoading] = React.useState(true)
   const [activeTab, setActiveTab] = React.useState<string>("Todos")
-  
+
+  const updatingOrderId = ordersState.updatingOrderId
+
   const [locationFilter, setLocationFilter] = React.useState<string>("all")
   const [searchTerm, setSearchTerm] = React.useState("")
   const [dateFilter, setDateFilter] = React.useState<Date | undefined>()
 
-  const supabase = createClient()
-
   const statuses: string[] = ["Todos", "Pendiente", "Completado", "Cancelado"]
 
-  const fetchData = React.useCallback(async (forceRefresh = false) => {
-    const cacheKey = `pedidos:${user?.role}:${user?.location_id ?? 'all'}`
+  // Identidad de la sesión actual: cualquier cambio invalida datos en vuelo.
+  const sessionIdentity = React.useMemo(
+    () => (user ? `${user.id}:${user.role}:${user.location_id ?? 'all'}` : null),
+    [user]
+  )
+  // Se sincroniza en el render para que una respuesta asíncrona pueda comparar
+  // contra la identidad vigente sin esperar a los efectos.
+  const sessionIdentityRef = React.useRef<string | null>(null)
+  sessionIdentityRef.current = sessionIdentity
+  // Última identidad ya invalidada, para no repetir la limpieza en cada render.
+  const invalidatedIdentityRef = React.useRef<string | null>(null)
 
-    if (!forceRefresh) {
-      const cachedOrders = adminCache.get<Order[]>(cacheKey)
-      const cachedLocations = adminCache.get<Location[]>('ubicaciones')
-      if (cachedOrders) {
-        setOrders(cachedOrders)
-        if (cachedLocations) setLocations(cachedLocations)
-        setLoading(false)
+  // GET y PATCH tienen secuencias independientes: una lectura intermedia no
+  // puede invalidar la reconciliación de una mutación confirmada.
+  const sequencerRef = React.useRef<RequestSequencer | null>(null)
+  if (sequencerRef.current === null) {
+    sequencerRef.current = createRequestSequencer()
+  }
+  const sequencer = sequencerRef.current
+
+  // Una respuesta solo puede tocar el estado si pertenece a la solicitud más
+  // reciente de su dominio y a la sesión vigente.
+  const isCurrentGet = React.useCallback(
+    (requestId: number, identity: string) =>
+      sequencer.isCurrentGet(requestId) &&
+      isSameSession(identity, sessionIdentityRef.current),
+    [sequencer]
+  )
+
+  const isCurrentPatch = React.useCallback(
+    (requestId: number, identity: string) =>
+      sequencer.isCurrentPatch(requestId) &&
+      isSameSession(identity, sessionIdentityRef.current),
+    [sequencer]
+  )
+
+  const invalidateOrders = React.useCallback(
+    (reason: 'identity-changed' | 'auth-error') => {
+      const requestId = sequencer.invalidate()
+      dispatchOrders({ type: reason, requestId })
+      setLocations([])
+      adminCache.invalidateAll()
+    },
+    [sequencer]
+  )
+
+  const handleAuthError = React.useCallback((status: number) => {
+    if (status === 401) {
+      invalidateOrders('auth-error')
+      toast({
+        variant: "destructive",
+        title: "Sesión no válida",
+        description: "Vuelve a iniciar sesión para continuar.",
+      })
+      return true
+    }
+
+    if (status === 403) {
+      invalidateOrders('auth-error')
+      toast({
+        variant: "destructive",
+        title: "Sin permiso",
+        description: "No tienes autorización para ver o modificar estos pedidos.",
+      })
+      return true
+    }
+
+    return false
+  }, [invalidateOrders, toast])
+
+  const fetchData = React.useCallback(async () => {
+    if (authLoading || !user || !sessionIdentity) {
+      return
+    }
+
+    const identity = sessionIdentity
+
+    // Cada lectura recibe un identificador de su propia secuencia: las
+    // respuestas de una sesión anterior o de una lectura superada se descartan.
+    const requestId = sequencer.startGet()
+    dispatchOrders({ type: 'request-started', requestId })
+
+    try {
+      // Revalida la sesión con el servidor antes de mostrar cualquier dato.
+      // La caché de pedidos nunca se pinta sin esta comprobación.
+      const res = await adminFetch('/api/admin/pedidos')
+
+      if (!isCurrentGet(requestId, identity)) return
+
+      if (handleAuthError(res.status)) {
         return
       }
-    }
 
-    setLoading(true)
-    try {
-      const params = new URLSearchParams({ role: user?.role ?? '' })
-      if (user?.role === 'worker' && user.location_id) {
-        params.set('location_id', user.location_id)
+      if (!res.ok) {
+        throw new Error(`No se pudieron cargar los pedidos (HTTP ${res.status}).`)
       }
-      const res = await fetch(`/api/admin/pedidos?${params}`)
-      const ordersData = await res.json()
-      adminCache.set(cacheKey, ordersData)
-      setOrders(ordersData)
 
-      if (user?.role === 'admin') {
-        const cachedLocs = adminCache.get<Location[]>('ubicaciones')
-        if (cachedLocs) {
-          setLocations(cachedLocs)
-        } else {
-          const locRes = await fetch('/api/admin/ubicaciones')
-          const locsData = await locRes.json()
-          adminCache.set('ubicaciones', locsData)
-          setLocations(locsData)
+      const ordersData = await res.json()
+
+      if (!isCurrentGet(requestId, identity)) return
+
+      dispatchOrders({
+        type: 'request-succeeded',
+        requestId,
+        identity,
+        orders: ordersData,
+      })
+
+      if (user.role === 'admin') {
+        try {
+          const cachedLocations = adminCache.get<Location[]>('ubicaciones')
+          if (cachedLocations) {
+            setLocations(cachedLocations)
+          } else {
+            const locRes = await adminFetch('/api/admin/ubicaciones')
+
+            if (!isCurrentGet(requestId, identity)) return
+
+            if (handleAuthError(locRes.status)) {
+              return
+            }
+
+            if (!locRes.ok) {
+              throw new Error(`No se pudieron cargar las ubicaciones (HTTP ${locRes.status}).`)
+            }
+
+            const locsData = await locRes.json()
+
+            if (!isCurrentGet(requestId, identity)) return
+
+            adminCache.set('ubicaciones', locsData)
+            setLocations(locsData)
+          }
+        } catch (locationError) {
+          if (!isCurrentGet(requestId, identity)) return
+          toast({
+            variant: "destructive",
+            title: "Error",
+            description: locationError instanceof Error
+              ? locationError.message
+              : "No se pudieron cargar las ubicaciones.",
+          })
+          console.error("Error fetching locations:", locationError)
         }
+      } else {
+        setLocations([])
       }
     } catch (e) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudieron cargar los pedidos."})
+      if (!isCurrentGet(requestId, identity)) return
+
+      dispatchOrders({ type: 'request-failed', requestId, identity })
+
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: e instanceof Error ? e.message : "No se pudieron cargar los pedidos.",
+      })
       console.error("Error fetching orders:", e)
-    } finally {
-      setLoading(false)
     }
-  }, [user?.role, user?.location_id, toast])
+  }, [authLoading, user, sessionIdentity, isCurrentGet, handleAuthError, toast])
+
+  // Al cambiar de sesión se limpia el estado y se invalidan las respuestas
+  // pendientes de la sesión anterior (GET y PATCH). El render ya bloquea los
+  // datos ajenos mediante `selectVisibleOrders`, sin esperar a este efecto.
+  React.useEffect(() => {
+    if (invalidatedIdentityRef.current === sessionIdentity) return
+
+    invalidatedIdentityRef.current = sessionIdentity
+    invalidateOrders('identity-changed')
+  }, [sessionIdentity, invalidateOrders])
 
   React.useEffect(() => {
+    if (authLoading || !user) return
+
     fetchData()
-  }, [fetchData])
+  }, [authLoading, user, fetchData])
 
   const clearFilters = () => {
     setLocationFilter("all");
@@ -124,8 +264,20 @@ export default function PedidosPage() {
     setDateFilter(undefined);
   };
 
+  // La visibilidad se decide en el render, no en un efecto: si la identidad que
+  // produjo los pedidos no es la de la sesión actual, se pinta una lista vacía.
+  const visibleOrders = React.useMemo(
+    () => selectVisibleOrders(ordersState, sessionIdentity),
+    [ordersState, sessionIdentity]
+  )
+
+  const showOrdersLoader = React.useMemo(
+    () => authLoading || selectIsOrdersLoading(ordersState, sessionIdentity),
+    [authLoading, ordersState, sessionIdentity]
+  )
+
   const filteredOrders = React.useMemo(() => {
-    let tempOrders = orders
+    let tempOrders = visibleOrders
 
     if (activeTab !== "Todos") {
       const statusInEnglish = spanishToOrderStatus(activeTab)
@@ -141,79 +293,113 @@ export default function PedidosPage() {
     }
     
     if (dateFilter) {
-      tempOrders = tempOrders.filter(order => format(parseISO(order.created_at), 'yyyy-MM-dd') === format(dateFilter, 'yyyy-MM-dd'))
+      tempOrders = tempOrders.filter(order => {
+        if (!order.created_at) return false
+        const createdAt = parseISO(order.created_at)
+        if (Number.isNaN(createdAt.getTime())) return false
+        return format(createdAt, 'yyyy-MM-dd') === format(dateFilter, 'yyyy-MM-dd')
+      })
     }
 
     return tempOrders
-  }, [orders, activeTab, locationFilter, user?.role, searchTerm, dateFilter])
+  }, [visibleOrders, activeTab, locationFilter, user?.role, searchTerm, dateFilter])
 
   const handleStatusChange = async (order: Order, newStatusSpanish: string) => {
     const newStatus = spanishToOrderStatus(newStatusSpanish);
     const oldStatus = order.status as OrderStatus;
 
-    if (!newStatus || !order.order_items || newStatus === oldStatus) {
+    if (!newStatus || newStatus === oldStatus) {
+      return;
+    }
+
+    if (oldStatus !== 'pending') {
+      toast({
+        variant: "destructive",
+        title: "Acción no permitida",
+        description: "Solo los pedidos pendientes pueden cambiar de estado.",
+      });
+      return;
+    }
+
+    if (updatingOrderId) {
+      return;
+    }
+
+    const identity = sessionIdentity
+
+    if (!identity) {
+      return;
+    }
+
+    // El PATCH tiene su propia secuencia: un GET intermedio de la misma sesión
+    // no lo invalida. Solo un cambio de sesión, un 401/403 o otro PATCH lo hace.
+    const requestId = sequencer.startPatch()
+    dispatchOrders({ type: 'patch-started', requestId, orderId: order.id })
+
+    try {
+      const res = await adminFetch('/api/admin/pedidos', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_id: order.id,
+          new_status: newStatus,
+        }),
+      });
+
+      // Respuesta de una sesión anterior: no toca estado, ni notifica, ni recarga.
+      if (!isCurrentPatch(requestId, identity)) {
         return;
-    }
+      }
 
-    let stockChange = 0;
-    if (newStatus === 'completed' && oldStatus !== 'completed') {
-        stockChange = -1; 
-    } else if (oldStatus === 'completed' && newStatus !== 'completed') {
-        stockChange = 1; 
-    }
+      if (handleAuthError(res.status)) {
+        return;
+      }
 
-    if (stockChange !== 0) {
-        const productIds = order.order_items.map(item => item.product_id);
-        const { data: products, error: productsError } = await supabase
-            .from('products')
-            .select('id, stock')
-            .in('id', productIds);
-
-        if (productsError) {
-            toast({ variant: "destructive", title: "Error", description: "No se pudo obtener el stock para la actualización." });
-            return;
-        }
-
-        const productStockMap = new Map(products.map(p => [p.id, p.stock]));
-        
-        const stockUpdatePromises = order.order_items.map(item => {
-            const currentStock = productStockMap.get(item.product_id) ?? 0;
-            const newStock = currentStock + (item.quantity * stockChange);
-            return supabase.from('products').update({ stock: newStock }).eq('id', item.product_id);
+      if (res.status === 409) {
+        toast({
+          variant: "destructive",
+          title: "Pedido desactualizado",
+          description: "El pedido ya no permite esa transición. Se recargará la lista.",
         });
+        await fetchData();
+        return;
+      }
 
-        const results = await Promise.all(stockUpdatePromises);
-        if (results.some(res => res.error)) {
-            const action = stockChange === -1 ? "descontar" : "devolver";
-            toast({ variant: "destructive", title: "Error", description: `Fallo al ${action} el stock para todos los productos.` });
-            return; 
+      if (!res.ok) {
+        let message = `No se pudo actualizar el pedido (HTTP ${res.status}).`;
+
+        try {
+          const payload = await res.json();
+          if (payload?.error) message = payload.error;
+        } catch {
+          // La respuesta de error no traía JSON.
         }
 
-        const { error: updateOrderStatusError } = await supabase
-            .from('orders')
-            .update({ status: newStatus })
-            .eq('id', order.id);
+        throw new Error(message);
+      }
 
-        if (updateOrderStatusError) {
-            toast({ variant: "destructive", title: "Error de Sincronización", description: "Se ajustó el stock, pero no se pudo actualizar el estado del pedido. Contacte a soporte." });
-            console.error('Error updating order status:', updateOrderStatusError);
-        } else {
-            toast({ title: "Éxito", description: "Estado del pedido y stock actualizados correctamente." });
-            fetchData();
-        }
-    } else {
-        const { error } = await supabase
-            .from('orders')
-            .update({ status: newStatus })
-            .eq('id', order.id)
+      toast({
+        title: "Éxito",
+        description: newStatus === 'completed'
+          ? "Pedido completado. El stock ya estaba reservado."
+          : "Pedido cancelado y stock devuelto.",
+      });
+      await fetchData();
+    } catch (e) {
+      if (!isCurrentPatch(requestId, identity)) {
+        return;
+      }
 
-        if (error) {
-            toast({ variant: "destructive", title: "Error", description: "No se pudo actualizar el estado del pedido."})
-            console.error('Error updating order status:', error)
-        } else {
-            toast({ title: "Éxito", description: "Estado del pedido actualizado."})
-            fetchData()
-        }
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: e instanceof Error ? e.message : "No se pudo actualizar el pedido.",
+      });
+      console.error('Error updating order status:', e);
+    } finally {
+      // El reducer ignora el token si la sesión ya cambió o si hay un PATCH más
+      // reciente; así un PATCH viejo no limpia el spinner del actual.
+      dispatchOrders({ type: 'patch-finished', requestId })
     }
   };
 
@@ -226,7 +412,7 @@ export default function PedidosPage() {
     }
   }
 
-  if (loading) {
+  if (showOrdersLoader) {
     return (
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando pedidos..." size={48} />
@@ -359,22 +545,37 @@ export default function PedidosPage() {
                       <TableCell>
                         <Badge className={`${getStatusColor(order.status as OrderStatus)} text-white`}>{orderStatusToSpanish[order.status as OrderStatus] || order.status}</Badge>
                       </TableCell>
-                      <TableCell className="text-right">S/ {order.total_price.toFixed(2)}</TableCell>
+                      <TableCell className="text-right">S/ {Number(order.total_price ?? 0).toFixed(2)}</TableCell>
                       <TableCell>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button aria-haspopup="true" size="icon" variant="ghost">
+                            <Button
+                              aria-haspopup="true"
+                              size="icon"
+                              variant="ghost"
+                              disabled={updatingOrderId === order.id}
+                            >
                               <MoreHorizontal className="h-4 w-4" />
                               <span className="sr-only">Toggle menu</span>
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuLabel>Acciones</DropdownMenuLabel>
-                            {statuses.slice(1).map(status => (
-                              <DropdownMenuItem key={status} onSelect={() => handleStatusChange(order, status)}>
-                                Marcar como {status}
+                            {order.status === 'pending' ? (
+                              ['Completado', 'Cancelado'].map(status => (
+                                <DropdownMenuItem
+                                  key={status}
+                                  disabled={updatingOrderId === order.id}
+                                  onSelect={() => handleStatusChange(order, status)}
+                                >
+                                  Marcar como {status}
+                                </DropdownMenuItem>
+                              ))
+                            ) : (
+                              <DropdownMenuItem disabled>
+                                Pedido finalizado
                               </DropdownMenuItem>
-                            ))}
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </TableCell>

@@ -186,17 +186,19 @@ export interface Database {
           phone_number: string | null
           created_at: string
           updated_at: string
-          role: string
+          role: 'customer' | 'worker' | 'admin'
+          location_id: string | null
           password_hash: string | null
         }
         Insert: {
-          id?: string
+          id: string
           name?: string | null
           email?: string | null
           phone_number?: string | null
           created_at?: string
           updated_at?: string
-          role?: string
+          role?: 'customer' | 'worker' | 'admin'
+          location_id?: string | null
           password_hash?: string | null
         }
         Update: {
@@ -206,7 +208,8 @@ export interface Database {
           phone_number?: string | null
           created_at?: string
           updated_at?: string
-          role?: string
+          role?: 'customer' | 'worker' | 'admin'
+          location_id?: string | null
           password_hash?: string | null
         }
       }
