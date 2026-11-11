@@ -5,9 +5,9 @@
  * solo muestra `orders` cuando `identity === sessionIdentity`; así un cambio de
  * sesión oculta el listado en el mismo render, sin esperar a un `useEffect`.
  *
- * `requestSeq` y `patchSeq` son monotónicos entre sesiones: una respuesta HTTP
- * retrasada de una sesión anterior se descarta aunque llegue después del cambio,
- * tanto para los GET como para el PATCH de transición de estado.
+ * Las lecturas (GET) y las mutaciones (PATCH) usan secuencias independientes:
+ * una lectura de la misma sesión no puede invalidar la reconciliación de una
+ * mutación ya confirmada. Un cambio de sesión o un 401/403 invalida ambas.
  */
 
 export type SessionIdentity = string | null
@@ -23,8 +23,8 @@ export interface OrdersState<T> {
   denied: boolean
   /** Pedido con un PATCH en curso en la sesión actual. */
   updatingOrderId: string | null
-  /** Último identificador de PATCH aceptado. */
-  patchSeq: number
+  /** Token del PATCH en curso; `null` si no hay ninguno. */
+  activePatchToken: number | null
 }
 
 export type OrdersAction<T> =
@@ -44,7 +44,7 @@ export function initialOrdersState<T>(): OrdersState<T> {
     requestSeq: 0,
     denied: false,
     updatingOrderId: null,
-    patchSeq: 0,
+    activePatchToken: null,
   }
 }
 
@@ -89,13 +89,13 @@ export function ordersReducer<T>(
       return {
         ...state,
         updatingOrderId: action.orderId,
-        patchSeq: nextSeq(state.patchSeq, action.requestId),
+        activePatchToken: action.requestId,
       }
 
     case 'patch-finished':
       // Un PATCH de una sesión anterior no debe limpiar el spinner del actual.
-      if (action.requestId !== state.patchSeq) return state
-      return { ...state, updatingOrderId: null }
+      if (action.requestId !== state.activePatchToken) return state
+      return { ...state, updatingOrderId: null, activePatchToken: null }
 
     case 'identity-changed':
       return {
@@ -104,8 +104,8 @@ export function ordersReducer<T>(
         loading: false,
         denied: false,
         updatingOrderId: null,
+        activePatchToken: null,
         requestSeq: nextSeq(state.requestSeq, action.requestId),
-        patchSeq: nextSeq(state.patchSeq, action.requestId),
       }
 
     case 'auth-error':
@@ -115,8 +115,8 @@ export function ordersReducer<T>(
         loading: false,
         denied: true,
         updatingOrderId: null,
+        activePatchToken: null,
         requestSeq: nextSeq(state.requestSeq, action.requestId),
-        patchSeq: nextSeq(state.patchSeq, action.requestId),
       }
 
     default:
@@ -153,19 +153,49 @@ export function selectIsOrdersLoading<T>(
 }
 
 /**
- * `true` si la respuesta identificada por `requestId` pertenece a la sesión
- * vigente. Se usa para descartar respuestas HTTP retrasadas de los GET y del
- * PATCH antes de tocar el estado, notificar o recargar.
+ * Secuencias independientes para lecturas y mutaciones de la misma pantalla.
+ *
+ * - `startGet` / `isCurrentGet`: ordenan las lecturas entre sí.
+ * - `startPatch` / `isCurrentPatch`: ordenan las mutaciones entre sí.
+ * - `invalidate`: cambio de sesión o 401/403; tumba ambas.
+ *
+ * Un GET intermedio nunca invalida un PATCH pendiente, y un PATCH nunca
+ * invalida una lectura legítima.
  */
-export function isCurrentResponse(
-  requestId: number,
-  requestSeq: number,
+export interface RequestSequencer {
+  startGet(): number
+  startPatch(): number
+  isCurrentGet(requestId: number): boolean
+  isCurrentPatch(requestId: number): boolean
+  /** Invalida ambas secuencias y devuelve el token GET vigente. */
+  invalidate(): number
+}
+
+export function createRequestSequencer(): RequestSequencer {
+  let getSeq = 0
+  let patchSeq = 0
+
+  return {
+    startGet: () => ++getSeq,
+    startPatch: () => ++patchSeq,
+    isCurrentGet: (requestId) => requestId === getSeq,
+    isCurrentPatch: (requestId) => requestId === patchSeq,
+    invalidate: () => {
+      getSeq++
+      patchSeq++
+      return getSeq
+    },
+  }
+}
+
+/**
+ * `true` si la respuesta pertenece a la identidad de la sesión vigente.
+ * Junto con `RequestSequencer` descarta respuestas HTTP retrasadas antes de
+ * tocar el estado, notificar o recargar.
+ */
+export function isSameSession(
   identity: SessionIdentity,
   sessionIdentity: SessionIdentity
 ): boolean {
-  return (
-    requestId === requestSeq &&
-    identity !== null &&
-    identity === sessionIdentity
-  )
+  return identity !== null && identity === sessionIdentity
 }

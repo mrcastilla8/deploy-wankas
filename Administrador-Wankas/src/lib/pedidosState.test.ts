@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 
 import { adminCache } from './adminCache'
 import {
+  createRequestSequencer,
   initialOrdersState,
-  isCurrentResponse,
+  isSameSession,
   ordersReducer,
   selectIsOrdersLoading,
   selectVisibleOrders,
@@ -203,12 +204,93 @@ test('un 401/403 durante el PATCH limpia el updatingOrderId', () => {
   assert.equal(state.denied, true)
 })
 
-test('isCurrentResponse descarta respuestas de otra sesion o de otra solicitud', () => {
-  assert.equal(isCurrentResponse(5, 5, WORKER, WORKER), true)
-  // Llegó una solicitud más nueva.
-  assert.equal(isCurrentResponse(5, 6, WORKER, WORKER), false)
-  // La sesión cambió mientras la solicitud estaba en vuelo.
-  assert.equal(isCurrentResponse(5, 5, ADMIN, WORKER), false)
-  // Sin identidad no hay respuesta válida.
-  assert.equal(isCurrentResponse(5, 5, WORKER, null), false)
+test('el secuenciador separa GET y PATCH y descarta respuestas viejas', () => {
+  const seq = createRequestSequencer()
+
+  const patchId = seq.startPatch()
+  const firstGet = seq.startGet()
+
+  // Un GET intermedio no invalida el PATCH pendiente.
+  assert.equal(seq.isCurrentPatch(patchId), true)
+  assert.equal(seq.isCurrentGet(firstGet), true)
+
+  // Un GET posterior descarta la lectura anterior, pero no el PATCH.
+  const nextGet = seq.startGet()
+  assert.equal(seq.isCurrentGet(firstGet), false)
+  assert.equal(seq.isCurrentGet(nextGet), true)
+  assert.equal(seq.isCurrentPatch(patchId), true)
+
+  // Un PATCH posterior descarta el anterior, pero no el GET.
+  const nextPatch = seq.startPatch()
+  assert.equal(seq.isCurrentPatch(patchId), false)
+  assert.equal(seq.isCurrentPatch(nextPatch), true)
+  assert.equal(seq.isCurrentGet(nextGet), true)
+
+  // invalidate (cambio de sesión o 401/403) tumba ambas secuencias.
+  seq.invalidate()
+  assert.equal(seq.isCurrentGet(nextGet), false)
+  assert.equal(seq.isCurrentPatch(nextPatch), false)
+})
+
+test('isSameSession descarta respuestas de otra sesion', () => {
+  assert.equal(isSameSession(WORKER, WORKER), true)
+  assert.equal(isSameSession(ADMIN, WORKER), false)
+  assert.equal(isSameSession(WORKER, null), false)
+  assert.equal(isSameSession(null, WORKER), false)
+})
+
+test('PATCH pendiente + GET intermedio + PATCH exitoso reconcilia el listado', () => {
+  const seq = createRequestSequencer()
+  let state = loadedWith(ADMIN, ['pedido-pendiente'])
+
+  // Coincide con la lectura inicial de `loadedWith`.
+  seq.startGet()
+
+  // PATCH en vuelo.
+  const patchId = seq.startPatch()
+  state = ordersReducer(state, {
+    type: 'patch-started',
+    requestId: patchId,
+    orderId: 'pedido-1',
+  })
+  assert.equal(state.updatingOrderId, 'pedido-1')
+
+  // GET intermedio de la misma sesión (refresco de auth, StrictMode, etc.).
+  const intermediateGet = seq.startGet()
+  state = ordersReducer(state, {
+    type: 'request-started',
+    requestId: intermediateGet,
+  })
+
+  // El PATCH sigue vigente pese al GET intermedio.
+  assert.equal(seq.isCurrentPatch(patchId), true)
+  assert.equal(isSameSession(ADMIN, ADMIN), true)
+
+  // PostgreSQL confirmó el cambio: se acepta y se limpia el spinner.
+  state = ordersReducer(state, { type: 'patch-finished', requestId: patchId })
+  assert.equal(state.updatingOrderId, null)
+
+  // Reconciliación con una lectura nueva.
+  const reconciliationGet = seq.startGet()
+  state = ordersReducer(state, {
+    type: 'request-started',
+    requestId: reconciliationGet,
+  })
+  state = ordersReducer(state, {
+    type: 'request-succeeded',
+    requestId: reconciliationGet,
+    identity: ADMIN,
+    orders: ['pedido-completado'],
+  })
+
+  // La lectura intermedia llega tarde y no pisa el estado confirmado.
+  state = ordersReducer(state, {
+    type: 'request-succeeded',
+    requestId: intermediateGet,
+    identity: ADMIN,
+    orders: ['pedido-pendiente'],
+  })
+
+  assert.deepEqual(selectVisibleOrders(state, ADMIN), ['pedido-completado'])
+  assert.equal(selectIsOrdersLoading(state, ADMIN), false)
 })

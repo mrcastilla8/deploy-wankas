@@ -8,11 +8,13 @@ import { orderStatusToSpanish, spanishToOrderStatus } from "@/types"
 import { adminFetch } from "@/lib/adminFetch"
 import { adminCache } from "@/lib/adminCache"
 import {
+  createRequestSequencer,
   initialOrdersState,
-  isCurrentResponse,
+  isSameSession,
   ordersReducer,
   selectIsOrdersLoading,
   selectVisibleOrders,
+  type RequestSequencer,
 } from "@/lib/pedidosState"
 import { Loader } from "@/components/ui/loader"
 import { format, parseISO } from "date-fns"
@@ -90,29 +92,39 @@ export default function PedidosPage() {
   sessionIdentityRef.current = sessionIdentity
   // Última identidad ya invalidada, para no repetir la limpieza en cada render.
   const invalidatedIdentityRef = React.useRef<string | null>(null)
-  const requestSeqRef = React.useRef(0)
+
+  // GET y PATCH tienen secuencias independientes: una lectura intermedia no
+  // puede invalidar la reconciliación de una mutación confirmada.
+  const sequencerRef = React.useRef<RequestSequencer | null>(null)
+  if (sequencerRef.current === null) {
+    sequencerRef.current = createRequestSequencer()
+  }
+  const sequencer = sequencerRef.current
 
   // Una respuesta solo puede tocar el estado si pertenece a la solicitud más
-  // reciente y a la sesión vigente.
-  const isCurrent = React.useCallback(
+  // reciente de su dominio y a la sesión vigente.
+  const isCurrentGet = React.useCallback(
     (requestId: number, identity: string) =>
-      isCurrentResponse(
-        requestId,
-        requestSeqRef.current,
-        identity,
-        sessionIdentityRef.current
-      ),
-    []
+      sequencer.isCurrentGet(requestId) &&
+      isSameSession(identity, sessionIdentityRef.current),
+    [sequencer]
+  )
+
+  const isCurrentPatch = React.useCallback(
+    (requestId: number, identity: string) =>
+      sequencer.isCurrentPatch(requestId) &&
+      isSameSession(identity, sessionIdentityRef.current),
+    [sequencer]
   )
 
   const invalidateOrders = React.useCallback(
     (reason: 'identity-changed' | 'auth-error') => {
-      requestSeqRef.current++
-      dispatchOrders({ type: reason, requestId: requestSeqRef.current })
+      const requestId = sequencer.invalidate()
+      dispatchOrders({ type: reason, requestId })
       setLocations([])
       adminCache.invalidateAll()
     },
-    []
+    [sequencer]
   )
 
   const handleAuthError = React.useCallback((status: number) => {
@@ -146,9 +158,9 @@ export default function PedidosPage() {
 
     const identity = sessionIdentity
 
-    // Cada solicitud recibe un identificador: las respuestas de una sesión
-    // anterior (o de una solicitud ya superada) se descartan al resolver.
-    const requestId = ++requestSeqRef.current
+    // Cada lectura recibe un identificador de su propia secuencia: las
+    // respuestas de una sesión anterior o de una lectura superada se descartan.
+    const requestId = sequencer.startGet()
     dispatchOrders({ type: 'request-started', requestId })
 
     try {
@@ -156,7 +168,7 @@ export default function PedidosPage() {
       // La caché de pedidos nunca se pinta sin esta comprobación.
       const res = await adminFetch('/api/admin/pedidos')
 
-      if (!isCurrent(requestId, identity)) return
+      if (!isCurrentGet(requestId, identity)) return
 
       if (handleAuthError(res.status)) {
         return
@@ -168,7 +180,7 @@ export default function PedidosPage() {
 
       const ordersData = await res.json()
 
-      if (!isCurrent(requestId, identity)) return
+      if (!isCurrentGet(requestId, identity)) return
 
       dispatchOrders({
         type: 'request-succeeded',
@@ -185,7 +197,7 @@ export default function PedidosPage() {
           } else {
             const locRes = await adminFetch('/api/admin/ubicaciones')
 
-            if (!isCurrent(requestId, identity)) return
+            if (!isCurrentGet(requestId, identity)) return
 
             if (handleAuthError(locRes.status)) {
               return
@@ -197,13 +209,13 @@ export default function PedidosPage() {
 
             const locsData = await locRes.json()
 
-            if (!isCurrent(requestId, identity)) return
+            if (!isCurrentGet(requestId, identity)) return
 
             adminCache.set('ubicaciones', locsData)
             setLocations(locsData)
           }
         } catch (locationError) {
-          if (!isCurrent(requestId, identity)) return
+          if (!isCurrentGet(requestId, identity)) return
           toast({
             variant: "destructive",
             title: "Error",
@@ -217,7 +229,7 @@ export default function PedidosPage() {
         setLocations([])
       }
     } catch (e) {
-      if (!isCurrent(requestId, identity)) return
+      if (!isCurrentGet(requestId, identity)) return
 
       dispatchOrders({ type: 'request-failed', requestId, identity })
 
@@ -228,7 +240,7 @@ export default function PedidosPage() {
       })
       console.error("Error fetching orders:", e)
     }
-  }, [authLoading, user, sessionIdentity, isCurrent, handleAuthError, toast])
+  }, [authLoading, user, sessionIdentity, isCurrentGet, handleAuthError, toast])
 
   // Al cambiar de sesión se limpia el estado y se invalidan las respuestas
   // pendientes de la sesión anterior (GET y PATCH). El render ya bloquea los
@@ -319,9 +331,9 @@ export default function PedidosPage() {
       return;
     }
 
-    // El PATCH comparte la secuencia con los GET: cualquier cambio de sesión
-    // (o una solicitud posterior) invalida su respuesta.
-    const requestId = ++requestSeqRef.current
+    // El PATCH tiene su propia secuencia: un GET intermedio de la misma sesión
+    // no lo invalida. Solo un cambio de sesión, un 401/403 o otro PATCH lo hace.
+    const requestId = sequencer.startPatch()
     dispatchOrders({ type: 'patch-started', requestId, orderId: order.id })
 
     try {
@@ -335,7 +347,7 @@ export default function PedidosPage() {
       });
 
       // Respuesta de una sesión anterior: no toca estado, ni notifica, ni recarga.
-      if (!isCurrent(requestId, identity)) {
+      if (!isCurrentPatch(requestId, identity)) {
         return;
       }
 
@@ -374,7 +386,7 @@ export default function PedidosPage() {
       });
       await fetchData();
     } catch (e) {
-      if (!isCurrent(requestId, identity)) {
+      if (!isCurrentPatch(requestId, identity)) {
         return;
       }
 
