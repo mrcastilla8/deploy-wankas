@@ -20,6 +20,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const USER_STORAGE_KEY = 'wankas_user';
+const PROFILE_FIELDS = 'id, name, email, phone_number, role, location_id, created_at, updated_at';
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -35,7 +36,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         if (session?.user) {
           const { data: profile } = await supabase
             .from('profiles')
-            .select('*')
+            .select(PROFILE_FIELDS)
             .eq('id', session.user.id)
             .single();
           if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
@@ -63,7 +64,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (session?.user) {
         const { data: profile } = await supabase
           .from('profiles')
-          .select('*')
+          .select(PROFILE_FIELDS)
           .eq('id', session.user.id)
           .single();
         if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
@@ -103,7 +104,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     if (data.user) {
       const { data: profile, error: dbError } = await supabase
         .from('profiles')
-        .select('*')
+        .select(PROFILE_FIELDS)
         .eq('id', data.user.id)
         .single();
 
