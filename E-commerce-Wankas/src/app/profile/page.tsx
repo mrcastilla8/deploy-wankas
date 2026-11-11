@@ -7,11 +7,10 @@ import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { User as UserIcon, Mail, LogOut, Edit3, AlertTriangle, PackageCheck, History } from 'lucide-react';
 import { Loader } from '@/components/ui/loader';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import Link from 'next/link';
 import { useLocale } from '@/context/locale-context';
-import { clientCache } from '@/lib/clientCache';
 import { getUserOrders, cancelOrder as cancelOrderService, type EnrichedOrder } from '@/services/orderService';
 import type { User } from '@/types';
 import { OrderHistoryCard } from '@/components/order-history-card';
@@ -23,9 +22,16 @@ export default function ProfilePage() {
   const { toast } = useToast();
   const { translations } = useLocale();
 
-  const [orders, setOrders] = useState<EnrichedOrder[]>([]);
-  const [isLoadingOrders, setIsLoadingOrders] = useState(true);
-  const [errorLoadingOrders, setErrorLoadingOrders] = useState<string | null>(null);
+  const userId = user?.id;
+  const [orderHistory, setOrderHistory] = useState<{
+    userId: string;
+    orders: EnrichedOrder[];
+    error?: string;
+  } | null>(null);
+  const currentHistory = orderHistory?.userId === userId ? orderHistory : null;
+  const orders = currentHistory?.orders ?? [];
+  const isLoadingOrders = !currentHistory;
+  const errorLoadingOrders = currentHistory?.error;
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -44,67 +50,32 @@ export default function ProfilePage() {
     }
   }, [searchParams, toast, translations]);
 
-  const fetchOrders = useCallback(async () => {
-    if (user?.id) {
-      const cacheKey = `orders_${user.id}`;
-      const cached = clientCache.get<EnrichedOrder[]>(cacheKey);
-      if (cached) {
-        setOrders(cached);
-        setIsLoadingOrders(false);
-        return;
-      }
+  useEffect(() => {
+    setOrderHistory(null);
+    if (authLoading || !userId) return;
 
-      setIsLoadingOrders(true);
-      setErrorLoadingOrders(null);
+    let active = true;
+    async function fetchOrders(id: string) {
       try {
-        let userOrders;
-        const response = await fetch(`/api/orders?userId=${user.id}`);
-        
-        if (response.ok) {
-            userOrders = await response.json();
-        } else if (response.status === 404) {
-            // CACHE_MISS -> Fetch directly from client Supabase to ensure RLS passes
-            userOrders = await getUserOrders(user.id);
-            
-            // Save to cache on the server
-            fetch('/api/orders', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user.id, orders: userOrders })
-            }).catch(e => console.error("Failed to save orders to cache:", e));
-        } else {
-            throw new Error('Network response was not ok');
-        }
-
-        if (userOrders?.error) throw new Error(userOrders.error);
-        setOrders(userOrders);
-        clientCache.set(cacheKey, userOrders);
-      } catch (error: any) {
+        const orders = await getUserOrders(id);
+        if (active) setOrderHistory({ userId: id, orders });
+      } catch (error) {
+        if (!active) return;
+        const message = error instanceof Error && error.message
+          ? error.message
+          : translations.profilePage.errorLoadingOrders;
         console.error("Error fetching user orders:", error);
-        setErrorLoadingOrders(error.message || translations.profilePage.errorLoadingOrders);
+        setOrderHistory({ userId: id, orders: [], error: message });
         toast({
           title: translations.common.error,
-          description: error.message || translations.profilePage.errorLoadingOrders,
+          description: message,
           variant: 'destructive',
         });
-      } finally {
-        setIsLoadingOrders(false);
       }
-    } else if (!authLoading && !user) { 
-      setIsLoadingOrders(false);
-      setOrders([]); 
     }
-  }, [user?.id, authLoading, toast, translations]);
-
-
-  useEffect(() => {
-    if (!authLoading && user?.id) {
-        fetchOrders();
-    } else if (!authLoading && !user) {
-        setIsLoadingOrders(false);
-        setOrders([]);
-    }
-  }, [user?.id, authLoading, fetchOrders]);
+    void fetchOrders(userId);
+    return () => { active = false; };
+  }, [userId, authLoading, toast, translations]);
 
 
   const handleCancelOrder = async (orderId: string) => {
@@ -117,9 +88,10 @@ export default function ProfilePage() {
       await cancelOrderService(orderId, user.id);
       toast({ title: translations.profilePage.orderCancelledTitle, description: translations.profilePage.orderCancelledDesc });
       
-      const newOrders = orders.map(o => o.id === orderId ? { ...o, status: 'cancelled' } : o) as EnrichedOrder[];
-      setOrders(newOrders);
-      clientCache.set(`orders_${user.id}`, newOrders);
+      setOrderHistory((history) => history?.userId === user.id ? {
+        ...history,
+        orders: history.orders.map((order) => order.id === orderId ? { ...order, status: 'cancelled' } : order),
+      } : history);
       
       return true;
     } catch (error: any) {
