@@ -3,20 +3,10 @@
 
 import * as React from "react"
 import { useAuth } from "@/hooks/use-auth"
-import type { UserProfile } from "@/types"
-import { createUserAction, updateUserAction, deleteUserAction } from "@/actions/usuarios"
-import { createClient } from "@/lib/supabase/client"
-import { adminCache } from "@/lib/adminCache"
+import { adminFetch } from "@/lib/adminFetch"
 import { Loader } from "@/components/ui/loader"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import {
   Table,
   TableBody,
@@ -33,68 +23,89 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { MoreHorizontal, PlusCircle } from "lucide-react"
+import { PlusCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+
+const usersPath = "/api/admin/usuarios"
+
+type ListedUser = {
+  id: string
+  name: string | null
+  email: string | null
+  role: string
+  location_id: string | null
+}
+
+const emptyForm = { name: "", email: "", password: "", role: "worker", locationId: "" }
+
+const errorMessages: Record<string, string> = {
+  INVALID_INPUT: "Revisa los campos ingresados y el formato del identificador de sede.",
+  LOCATION_NOT_FOUND: "La sede indicada no existe o ya no está disponible.",
+  LOCATION_REQUIRES_WORKER: "Solo se puede asignar una sede a un trabajador.",
+  USER_NOT_FOUND: "El usuario indicado no existe.",
+  USER_CONFLICT: "El correo ya está en uso o existe un conflicto con el usuario.",
+  USER_EMAIL_CONFLICT: "El correo está en proceso de cambio o requiere reconciliación. Si el conflicto persiste, solicita una revisión a soporte.",
+  USER_CREATION_ROLLBACK_FAILED: "No se pudo completar el alta ni retirar la cuenta creada. Revisa el estado del usuario.",
+  USER_UPDATE_ROLLBACK_FAILED: "No se pudo confirmar el cambio de correo. Solicita una revisión a soporte.",
+  USER_PROFILE_UPDATE_FAILED_AFTER_EMAIL_CHANGE: "El correo se actualizó. Hubo un error al guardar los demás cambios. Recarga la lista antes de volver a editar.",
+}
+
+async function responseError(response: Response, fallback: string) {
+  if (response.status === 401) return "Tu sesión no está disponible o ha caducado. Inicia sesión nuevamente."
+  if (response.status === 403) return "Solo los administradores pueden gestionar usuarios."
+
+  const body = await response.json().catch(() => null)
+  return typeof body?.error === "string" && Object.hasOwn(errorMessages, body.error)
+    ? errorMessages[body.error]
+    : fallback
+}
 
 export default function UsuariosPage() {
   const { user } = useAuth()
+  return <UserManagement key={user?.id} />
+}
+
+function UserManagement() {
   const { toast } = useToast()
-  const [profiles, setProfiles] = React.useState<UserProfile[]>([])
+  const [profiles, setProfiles] = React.useState<ListedUser[]>([])
   const [loading, setLoading] = React.useState(true)
-  const supabase = createClient()
+  const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [saving, setSaving] = React.useState(false)
 
   const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false)
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false)
 
-  const [userToEdit, setUserToEdit] = React.useState<UserProfile | null>(null)
-  const [userToDeleteId, setUserToDeleteId] = React.useState<string | null>(null)
+  const [userToEdit, setUserToEdit] = React.useState<ListedUser | null>(null)
 
-  const [formData, setFormData] = React.useState({
-    name: "",
-    email: "",
-    password: "",
-    role: "worker"
-  })
+  const [formData, setFormData] = React.useState(emptyForm)
 
-  const fetchUsers = React.useCallback(async (forceRefresh = false) => {
-    if (!forceRefresh) {
-      const cached = adminCache.get<UserProfile[]>('usuarios')
-      if (cached) {
-        setProfiles(cached)
-        setLoading(false)
+  const fetchUsers = React.useCallback(async (signal?: AbortSignal) => {
+    const fallback = "No se pudieron cargar los usuarios."
+    setLoading(true)
+    setLoadError(null)
+    try {
+      const response = await adminFetch(usersPath, { signal, cache: "no-store" })
+      if (!response.ok) {
+        const message = await responseError(response, fallback)
+        if (!signal?.aborted) setLoadError(message)
         return
       }
-    }
-    setLoading(true)
-    try {
-      const res = await fetch('/api/admin/usuarios')
-      const data = await res.json()
-      adminCache.set('usuarios', data)
-      setProfiles(data)
-    } catch (e) {
-      toast({ variant: "destructive", title: "Error", description: "No se pudieron cargar los usuarios."})
-      console.error(e)
+      const data: ListedUser[] = await response.json()
+      if (!signal?.aborted) setProfiles(data)
+    } catch {
+      if (!signal?.aborted) setLoadError(fallback)
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
-  }, [toast])
+  }, [])
 
   React.useEffect(() => {
-    fetchUsers()
+    const controller = new AbortController()
+    void fetchUsers(controller.signal)
+    return () => controller.abort()
   }, [fetchUsers])
 
   const handleFormChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -103,93 +114,91 @@ export default function UsuariosPage() {
   };
   
   const handleRoleChange = (value: string) => {
-    setFormData(prev => ({ ...prev, role: value }));
+    setFormData(prev => ({ ...prev, role: value, locationId: value === "worker" ? prev.locationId : "" }));
   }
 
   const handleOpenAddDialog = () => {
-    setFormData({ name: "", email: "", password: "", role: "worker" })
+    setFormData(emptyForm)
     setIsAddDialogOpen(true)
   }
 
-  const handleOpenEditDialog = (profile: UserProfile) => {
+  const handleOpenEditDialog = (profile: ListedUser) => {
     setUserToEdit(profile)
     setFormData({
       name: profile.name || "",
       email: profile.email || "",
-      password: "", 
-      role: profile.role || "worker",
+      password: "",
+      role: profile.role,
+      locationId: profile.location_id ?? "",
     })
     setIsEditDialogOpen(true)
   }
 
-  const handleOpenDeleteDialog = (userId: string) => {
-    setUserToDeleteId(userId)
-    setIsDeleteDialogOpen(true)
+  const mutateUser = async (
+    method: "POST" | "PATCH",
+    body: Record<string, string | null>,
+    successMessage: string,
+    fallback: string,
+    closeDialog: () => void,
+  ) => {
+    if (saving) return
+    setSaving(true)
+    try {
+      const response = await adminFetch(usersPath, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const message = await responseError(response, fallback)
+        if (response.status === 401 || response.status === 403) {
+          setProfiles([])
+          setLoadError(message)
+        }
+        toast({ variant: "destructive", title: "Error", description: message })
+        return
+      }
+      closeDialog()
+      toast({ title: "Éxito", description: successMessage })
+      await fetchUsers()
+    } catch {
+      toast({ variant: "destructive", title: "Error", description: fallback })
+    } finally {
+      setSaving(false)
+    }
   }
-  
+
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { name, email, password, role } = formData;
-    
-    if (!name || !email || !password || !role) {
-        toast({ variant: "destructive", title: "Error", description: "Por favor, rellena todos los campos."})
-        return
-    }
-
-    const response = await createUserAction({
-      name,
-      email,
-      role,
-      password,
-    });
-
-    if (!response.success) {
-      toast({ variant: "destructive", title: "Error", description: response.error || "No se pudo crear el usuario."})
-    } else {
-      toast({ title: "Éxito", description: "Usuario creado correctamente."})
+    const { name, email, password, role, locationId } = formData
+    const body = { name, email, password, role, ...(locationId.trim() && { location_id: locationId.trim() }) }
+    await mutateUser("POST", body, "Usuario creado correctamente.", "No se pudo crear el usuario.", () => {
       setIsAddDialogOpen(false)
-      fetchUsers()
-    }
+      setFormData(emptyForm)
+    })
   }
 
   const handleUpdateUser = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!userToEdit) return
 
-    const { name, email, role } = formData;
-    const response = await updateUserAction(userToEdit.id, {
-      name,
-      email,
-      role,
-    });
+    const { name, email, role, locationId } = formData
+    const body: Record<string, string | null> = { id: userToEdit.id }
+    if (name.trim() !== (userToEdit.name ?? "")) body.name = name.trim()
+    if (email.trim() !== (userToEdit.email ?? "")) body.email = email.trim()
+    if (role !== userToEdit.role) body.role = role
+    if (locationId.trim() !== (userToEdit.location_id ?? "")) body.location_id = locationId.trim() || null
 
-    if (!response.success) {
-      toast({ variant: "destructive", title: "Error", description: response.error || "No se pudo actualizar el usuario."})
-    } else {
-      toast({ title: "Éxito", description: "Usuario actualizado correctamente."})
+    const close = () => {
       setIsEditDialogOpen(false)
       setUserToEdit(null)
-      fetchUsers()
     }
+    if (Object.keys(body).length === 1) return close()
+    await mutateUser("PATCH", body, "Usuario actualizado correctamente.", "No se pudo actualizar el usuario.", close)
   }
 
-  const handleDeleteUser = async () => {
-    if (!userToDeleteId) return
-
-    const response = await deleteUserAction(userToDeleteId);
-    
-    if (!response.success) {
-      toast({ variant: "destructive", title: "Error", description: response.error || "No se pudo eliminar el usuario."})
-    } else {
-      toast({ title: "Éxito", description: "Usuario eliminado correctamente."})
-      fetchUsers()
-    }
-    setIsDeleteDialogOpen(false)
-    setUserToDeleteId(null)
-  }
-
-  if (user?.role !== 'admin') {
-    return <p>Acceso denegado.</p>
+  if (loadError) {
+    return <p role="alert" className="text-destructive">{loadError}</p>
   }
   
   if (loading) {
@@ -213,7 +222,7 @@ export default function UsuariosPage() {
             <div className="grid gap-2">
                 <CardTitle>Usuarios</CardTitle>
                 <CardDescription>
-                    Gestiona los usuarios del sistema.
+                    La baja de cuentas está temporalmente deshabilitada.
                 </CardDescription>
             </div>
             <div className="ml-auto flex items-center gap-2">
@@ -244,19 +253,7 @@ export default function UsuariosPage() {
                   <TableCell>{profile.email}</TableCell>
                   <TableCell className="capitalize">{profile.role}</TableCell>
                   <TableCell>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button aria-haspopup="true" size="icon" variant="ghost">
-                          <MoreHorizontal className="h-4 w-4" />
-                          <span className="sr-only">Toggle menu</span>
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuLabel>Acciones</DropdownMenuLabel>
-                        <DropdownMenuItem onSelect={() => handleOpenEditDialog(profile)}>Editar</DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600" onSelect={() => handleOpenDeleteDialog(profile.id)}>Eliminar</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <Button size="sm" variant="ghost" onClick={() => handleOpenEditDialog(profile)}>Editar</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -278,15 +275,15 @@ export default function UsuariosPage() {
                 <div className="grid gap-4 py-4">
                     <div className="grid gap-2">
                         <Label htmlFor="name">Nombre</Label>
-                        <Input id="name" value={formData.name} onChange={handleFormChange} placeholder="John Doe" />
+                        <Input id="name" required value={formData.name} onChange={handleFormChange} placeholder="John Doe" />
                     </div>
                     <div className="grid gap-2">
                         <Label htmlFor="email">Email</Label>
-                        <Input id="email" type="email" value={formData.email} onChange={handleFormChange} placeholder="worker@wanka.com" />
+                        <Input id="email" type="email" required value={formData.email} onChange={handleFormChange} placeholder="worker@wanka.com" />
                     </div>
                     <div className="grid gap-2">
                         <Label htmlFor="password">Contraseña</Label>
-                        <Input id="password" type="password" value={formData.password} onChange={handleFormChange} />
+                        <Input id="password" type="password" required minLength={6} autoComplete="new-password" value={formData.password} onChange={handleFormChange} />
                     </div>
                     <div className="grid gap-2">
                         <Label htmlFor="role">Rol</Label>
@@ -300,9 +297,15 @@ export default function UsuariosPage() {
                             </SelectContent>
                         </Select>
                     </div>
+                    {formData.role === "worker" && (
+                      <div className="grid gap-2">
+                          <Label htmlFor="locationId">ID de sede (opcional)</Label>
+                          <Input id="locationId" value={formData.locationId} onChange={handleFormChange} />
+                      </div>
+                    )}
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Guardar Usuario</Button>
+                    <Button type="submit" disabled={saving}>Guardar Usuario</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
@@ -334,36 +337,28 @@ export default function UsuariosPage() {
                                 <SelectValue placeholder="Seleccionar rol" />
                             </SelectTrigger>
                             <SelectContent>
+                                {userToEdit?.role && userToEdit.role !== "worker" && userToEdit.role !== "admin" && (
+                                  <SelectItem value={userToEdit.role} disabled>{userToEdit.role}</SelectItem>
+                                )}
                                 <SelectItem value="worker">Trabajador</SelectItem>
                                 <SelectItem value="admin">Administrador</SelectItem>
                             </SelectContent>
                         </Select>
                     </div>
+                    {formData.role === "worker" && (
+                      <div className="grid gap-2">
+                          <Label htmlFor="locationId">ID de sede (opcional)</Label>
+                          <Input id="locationId" value={formData.locationId} onChange={handleFormChange} />
+                      </div>
+                    )}
                 </div>
                 <DialogFooter>
-                    <Button type="submit">Actualizar Usuario</Button>
+                    <Button type="submit" disabled={saving}>Actualizar Usuario</Button>
                 </DialogFooter>
             </form>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>¿Estás completamente seguro?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Esta acción no se puede deshacer. Esto eliminará permanentemente el perfil del usuario de la base de datos.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteUser} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Eliminar
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }
