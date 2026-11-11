@@ -7,6 +7,12 @@ import type { Order, OrderStatus, Location } from "@/types"
 import { orderStatusToSpanish, spanishToOrderStatus } from "@/types"
 import { adminFetch } from "@/lib/adminFetch"
 import { adminCache } from "@/lib/adminCache"
+import {
+  initialOrdersState,
+  ordersReducer,
+  selectIsOrdersLoading,
+  selectVisibleOrders,
+} from "@/lib/pedidosState"
 import { Loader } from "@/components/ui/loader"
 import { format, parseISO } from "date-fns"
 import { es } from 'date-fns/locale'
@@ -57,9 +63,11 @@ import { cn } from "@/lib/utils"
 export default function PedidosPage() {
   const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
-  const [orders, setOrders] = React.useState<Order[]>([])
+  const [ordersState, dispatchOrders] = React.useReducer(
+    ordersReducer<Order>,
+    initialOrdersState<Order>()
+  )
   const [locations, setLocations] = React.useState<Location[]>([])
-  const [loading, setLoading] = React.useState(true)
   const [activeTab, setActiveTab] = React.useState<string>("Todos")
 
   const [locationFilter, setLocationFilter] = React.useState<string>("all")
@@ -77,15 +85,19 @@ export default function PedidosPage() {
   const identityRef = React.useRef<string | null>(null)
   const requestSeqRef = React.useRef(0)
 
-  const clearSessionData = React.useCallback(() => {
-    setOrders([])
-    setLocations([])
-    adminCache.invalidateAll()
-  }, [])
+  const invalidateOrders = React.useCallback(
+    (reason: 'identity-changed' | 'auth-error') => {
+      requestSeqRef.current++
+      dispatchOrders({ type: reason, requestId: requestSeqRef.current })
+      setLocations([])
+      adminCache.invalidateAll()
+    },
+    []
+  )
 
   const handleAuthError = React.useCallback((status: number) => {
     if (status === 401) {
-      clearSessionData()
+      invalidateOrders('auth-error')
       toast({
         variant: "destructive",
         title: "Sesión no válida",
@@ -95,7 +107,7 @@ export default function PedidosPage() {
     }
 
     if (status === 403) {
-      clearSessionData()
+      invalidateOrders('auth-error')
       toast({
         variant: "destructive",
         title: "Sin permiso",
@@ -105,18 +117,20 @@ export default function PedidosPage() {
     }
 
     return false
-  }, [clearSessionData, toast])
+  }, [invalidateOrders, toast])
 
   const fetchData = React.useCallback(async () => {
-    if (authLoading || !user) {
+    if (authLoading || !user || !sessionIdentity) {
       return
     }
+
+    const identity = sessionIdentity
 
     // Cada solicitud recibe un identificador: las respuestas de una sesión
     // anterior (o de una solicitud ya superada) se descartan al resolver.
     const requestId = ++requestSeqRef.current
+    dispatchOrders({ type: 'request-started', requestId })
 
-    setLoading(true)
     try {
       // Revalida la sesión con el servidor antes de mostrar cualquier dato.
       // La caché de pedidos nunca se pinta sin esta comprobación.
@@ -136,31 +150,48 @@ export default function PedidosPage() {
 
       if (requestId !== requestSeqRef.current) return
 
-      setOrders(ordersData)
+      dispatchOrders({
+        type: 'request-succeeded',
+        requestId,
+        identity,
+        orders: ordersData,
+      })
 
       if (user.role === 'admin') {
-        const cachedLocations = adminCache.get<Location[]>('ubicaciones')
-        if (cachedLocations) {
-          setLocations(cachedLocations)
-        } else {
-          const locRes = await adminFetch('/api/admin/ubicaciones')
+        try {
+          const cachedLocations = adminCache.get<Location[]>('ubicaciones')
+          if (cachedLocations) {
+            setLocations(cachedLocations)
+          } else {
+            const locRes = await adminFetch('/api/admin/ubicaciones')
 
-          if (requestId !== requestSeqRef.current) return
+            if (requestId !== requestSeqRef.current) return
 
-          if (handleAuthError(locRes.status)) {
-            return
+            if (handleAuthError(locRes.status)) {
+              return
+            }
+
+            if (!locRes.ok) {
+              throw new Error(`No se pudieron cargar las ubicaciones (HTTP ${locRes.status}).`)
+            }
+
+            const locsData = await locRes.json()
+
+            if (requestId !== requestSeqRef.current) return
+
+            adminCache.set('ubicaciones', locsData)
+            setLocations(locsData)
           }
-
-          if (!locRes.ok) {
-            throw new Error(`No se pudieron cargar las ubicaciones (HTTP ${locRes.status}).`)
-          }
-
-          const locsData = await locRes.json()
-
+        } catch (locationError) {
           if (requestId !== requestSeqRef.current) return
-
-          adminCache.set('ubicaciones', locsData)
-          setLocations(locsData)
+          toast({
+            variant: "destructive",
+            title: "Error",
+            description: locationError instanceof Error
+              ? locationError.message
+              : "No se pudieron cargar las ubicaciones.",
+          })
+          console.error("Error fetching locations:", locationError)
         }
       } else {
         setLocations([])
@@ -168,36 +199,29 @@ export default function PedidosPage() {
     } catch (e) {
       if (requestId !== requestSeqRef.current) return
 
+      dispatchOrders({ type: 'request-failed', requestId, identity })
+
       toast({
         variant: "destructive",
         title: "Error",
         description: e instanceof Error ? e.message : "No se pudieron cargar los pedidos.",
       })
       console.error("Error fetching orders:", e)
-    } finally {
-      if (requestId === requestSeqRef.current) {
-        setLoading(false)
-      }
     }
-  }, [authLoading, user, handleAuthError, toast])
+  }, [authLoading, user, sessionIdentity, handleAuthError, toast])
 
   // Al cambiar de sesión se limpia el estado y se invalidan las respuestas
-  // pendientes de la sesión anterior.
+  // pendientes de la sesión anterior. El render ya bloquea los datos ajenos
+  // mediante `selectVisibleOrders`, sin esperar a este efecto.
   React.useEffect(() => {
     if (identityRef.current === sessionIdentity) return
 
     identityRef.current = sessionIdentity
-    requestSeqRef.current++
-    clearSessionData()
-  }, [sessionIdentity, clearSessionData])
+    invalidateOrders('identity-changed')
+  }, [sessionIdentity, invalidateOrders])
 
   React.useEffect(() => {
-    if (authLoading) return
-
-    if (!user) {
-      setLoading(false)
-      return
-    }
+    if (authLoading || !user) return
 
     fetchData()
   }, [authLoading, user, fetchData])
@@ -208,8 +232,20 @@ export default function PedidosPage() {
     setDateFilter(undefined);
   };
 
+  // La visibilidad se decide en el render, no en un efecto: si la identidad que
+  // produjo los pedidos no es la de la sesión actual, se pinta una lista vacía.
+  const visibleOrders = React.useMemo(
+    () => selectVisibleOrders(ordersState, sessionIdentity),
+    [ordersState, sessionIdentity]
+  )
+
+  const showOrdersLoader = React.useMemo(
+    () => authLoading || selectIsOrdersLoading(ordersState, sessionIdentity),
+    [authLoading, ordersState, sessionIdentity]
+  )
+
   const filteredOrders = React.useMemo(() => {
-    let tempOrders = orders
+    let tempOrders = visibleOrders
 
     if (activeTab !== "Todos") {
       const statusInEnglish = spanishToOrderStatus(activeTab)
@@ -234,7 +270,7 @@ export default function PedidosPage() {
     }
 
     return tempOrders
-  }, [orders, activeTab, locationFilter, user?.role, searchTerm, dateFilter])
+  }, [visibleOrders, activeTab, locationFilter, user?.role, searchTerm, dateFilter])
 
   const handleStatusChange = async (order: Order, newStatusSpanish: string) => {
     const newStatus = spanishToOrderStatus(newStatusSpanish);
@@ -324,7 +360,7 @@ export default function PedidosPage() {
     }
   }
 
-  if (loading) {
+  if (showOrdersLoader) {
     return (
       <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
         <Loader text="Cargando pedidos..." size={48} />
