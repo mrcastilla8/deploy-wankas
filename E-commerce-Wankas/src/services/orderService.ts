@@ -263,6 +263,7 @@ export async function getUserOrders(_userId?: string): Promise<EnrichedOrder[]> 
 
     if (orderItemsError) {
       console.error(`Error fetching items for order ${order.id}:`, orderItemsError);
+      throw new Error('No se pudieron cargar los productos de tus pedidos.');
     }
 
     const items: EnrichedOrderItem[] = (orderItemsData ?? []).map(item => {
