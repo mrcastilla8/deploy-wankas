@@ -97,6 +97,8 @@ Ambos proyectos usan Next.js, Node 24.x y despliegues Git. En la lista de domini
 
 Hay previews `READY` para el SHA auditado `7efa5e2e034eb472582810ad53ea2af2b4d333ad` en ambos proyectos, con target Preview y alias único de rama. La última producción observada en ambos es `READY` desde `main` en `63ebf4c74f96ac9c9d167f9a499e73c16bfc3d82`; su target es `production` y ya tiene aliases automáticos asignados. Esto constata el comportamiento existente, no prueba una política de publicación segura.
 
+Tras el push REC-05, Vercel creó previews desde `fix/wankas-integracion-despliegue` para `8c106a13a4af952279437e0969ea7b48d46087cb`: `admin-wankas` (`dpl_6RRDgcNMQVW7ApVSYrj3wChu1ekw`) y `ecommerce-wankas` (`dpl_CAVAGMCg4LMFEejAuKDhRxKkdmuo`) llegaron a `READY`, target Preview, con alias único por deployment. No se asignó alias de Production.
+
 ### Qué ocurrirá al fusionar PR #22
 
 Con la configuración observada, el merge actualiza `main`; Vercel tiene despliegues Git habilitados y producción sigue `main`. Los cambios afectan las dos carpetas raíz. Vercel creará los despliegues de Production correspondientes y, como la autoasignación está habilitada y no hay checks, podrá asignar aliases/dominios productivos al quedar listos. Mantener el PR en Draft no constituye una barrera de Vercel una vez que se fusione.
@@ -133,7 +135,7 @@ No hay migraciones REC-05 ni escrituras de datos, por lo que el cambio no requie
 - **22 hallazgos altos de auditoría por app:** 0 críticos, pero la auditoría de dependencias de producción no pasa. Genkit sigue en su versión REC-04; resolver sus dependencias corresponde coordinar con ese ámbito.
 - **Volumen de informes:** todo el conjunto se pagina y materializa en memoria; establecer umbrales operativos antes de crecimiento alto.
 - **Warnings de ESLint/build:** permanecen avisos ajenos al alcance en pedidos/REC-03 y dependencias; cero errores de lint y builds locales completos.
-- **Resultado Vercel del SHA nuevo:** la evidencia READY disponible corresponde al SHA inicial. El push de este cierre puede producir previews automáticas, pero eso no equivale a autorización productiva.
+- **Previews no son aprobación productiva:** el SHA de implementación `8c106a1` quedó READY en ambos proyectos Preview; el equipo aún debe verificar el control que retiene la asignación de dominios de Production.
 
 ## 12. Criterios de aceptación y estado
 
