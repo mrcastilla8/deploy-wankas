@@ -258,12 +258,16 @@ la compra rechazada. El procedimiento manual sigue en
   ubicaciones y `adminCache`.
 - Cada solicitud lleva un identificador de secuencia y las respuestas pendientes
   de una sesión anterior se descartan; al cambiar de usuario se limpia el estado.
-- **El `PATCH` de `handleStatusChange` usa el mismo guard que los `GET`.**
-  `isCurrentResponse` compara el identificador y la identidad vigente antes de
+- **`GET` y `PATCH` usan secuencias independientes** (`createRequestSequencer`).
+  Una lectura de la misma sesión no invalida un `PATCH` pendiente, así que una
+  mutación confirmada por PostgreSQL siempre se reconcilia con una lectura nueva.
+  El cambio de sesión o un 401/403 invalida ambas secuencias (`invalidate`).
+- **El `PATCH` de `handleStatusChange` usa el mismo guard de identidad que los
+  `GET`.** `isCurrentPatch` compara su token y la identidad vigente antes de
   cualquier efecto: un 401/403, un 409, un error o un éxito de una sesión anterior
   no limpia estado, ni muestra notificaciones, ni recarga pedidos. `updatingOrderId`
   vive en el reducer y se reinicia al cambiar de sesión o al recibir 401/403; un
-  `PATCH` viejo no limpia el spinner de uno nuevo.
+  `PATCH` viejo no limpia el spinner de uno nuevo (`activePatchToken`).
 - **El listado se bloquea en el render, no en un efecto.** El estado vive en
   `src/lib/pedidosState.ts` y cada pedido queda atado a la identidad
   (`id:role:location_id`) que lo produjo. `selectVisibleOrders` devuelve `[]`
@@ -271,7 +275,7 @@ la compra rechazada. El procedimiento manual sigue en
   admin → worker nunca pinta datos de la sesión anterior, ni siquiera durante el
   frame previo a la limpieza. `selectIsOrdersLoading` muestra el loader mientras
   la identidad no coincida y lo desactiva tras un 401/403.
-- Pruebas: `npm run test:pedidos` (11 casos, ver `docs/rec-02-evidencias.md`).
+- Pruebas: `npm run test:pedidos` (13 casos, ver `docs/rec-02-evidencias.md`).
 
 ## 8. Coordinación pendiente
 

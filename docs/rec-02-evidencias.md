@@ -20,7 +20,7 @@
 | Migración REC-02 | `exit 0` |
 | T1–T21 | `exit 0` — `== Todas las pruebas SQL de REC-02 pasaron ==` |
 | Concurrencia (2 sesiones) | A confirma; B recibe `23514 / STOCK_INSUFICIENTE`; stock final `0` |
-| Frontend pedidos (`npm run test:pedidos`) | 11 pruebas, `pass 11`, `fail 0` |
+| Frontend pedidos (`npm run test:pedidos`) | 13 pruebas, `pass 13`, `fail 0` |
 
 ## T1–T21
 
@@ -143,10 +143,12 @@ ok 7 - una respuesta valida de la identidad actual si se muestra
 ok 8 - admin -> worker con PATCH pendiente: la respuesta vieja se descarta
 ok 9 - un PATCH viejo no limpia el updatingOrderId de uno nuevo
 ok 10 - un 401/403 durante el PATCH limpia el updatingOrderId
-ok 11 - isCurrentResponse descarta respuestas de otra sesion o de otra solicitud
+ok 11 - el secuenciador separa GET y PATCH y descarta respuestas viejas
+ok 12 - isSameSession descarta respuestas de otra sesion
+ok 13 - PATCH pendiente + GET intermedio + PATCH exitoso reconcilia el listado
 
-# tests 11
-# pass 11
+# tests 13
+# pass 13
 # fail 0
 ```
 
@@ -164,6 +166,11 @@ producción, no una copia:
 - **PATCH pendiente:** un cambio de sesión durante el `PATCH` reinicia
   `updatingOrderId`; la respuesta tardía no limpia el spinner de la sesión nueva
   ni la de un `PATCH` posterior, y un 401/403 en vuelo también lo reinicia.
+- **GET intermedio durante un PATCH:** `createRequestSequencer` mantiene
+  secuencias separadas. Un GET de la misma sesión ya **no** invalida el PATCH
+  pendiente: la mutación confirmada se acepta, se limpia `updatingOrderId` y la
+  lectura de reconciliación muestra el pedido actualizado. La lectura intermedia
+  que llega tarde se descarta por su propio token.
 
 ## Typecheck
 
