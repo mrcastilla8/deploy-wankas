@@ -20,7 +20,7 @@
 | Migración REC-02 | `exit 0` |
 | T1–T21 | `exit 0` — `== Todas las pruebas SQL de REC-02 pasaron ==` |
 | Concurrencia (2 sesiones) | A confirma; B recibe `23514 / STOCK_INSUFICIENTE`; stock final `0` |
-| Frontend pedidos (`npm run test:pedidos`) | 7 pruebas, `pass 7`, `fail 0` |
+| Frontend pedidos (`npm run test:pedidos`) | 11 pruebas, `pass 11`, `fail 0` |
 
 ## T1–T21
 
@@ -140,9 +140,13 @@ ok 4 - 401/403 limpia pedidos y cache
 ok 5 - tras un 401/403 una solicitud nueva vuelve a mostrar el loader
 ok 6 - un fallo de red deja la lista vacia y no muestra datos viejos
 ok 7 - una respuesta valida de la identidad actual si se muestra
+ok 8 - admin -> worker con PATCH pendiente: la respuesta vieja se descarta
+ok 9 - un PATCH viejo no limpia el updatingOrderId de uno nuevo
+ok 10 - un 401/403 durante el PATCH limpia el updatingOrderId
+ok 11 - isCurrentResponse descarta respuestas de otra sesion o de otra solicitud
 
-# tests 7
-# pass 7
+# tests 11
+# pass 11
 # fail 0
 ```
 
@@ -157,6 +161,9 @@ producción, no una copia:
   (worker) sí se muestra.
 - **401/403:** limpia `orders`, `identity` y `adminCache` (`pedidos`,
   `ubicaciones`) y no deja el loader activo.
+- **PATCH pendiente:** un cambio de sesión durante el `PATCH` reinicia
+  `updatingOrderId`; la respuesta tardía no limpia el spinner de la sesión nueva
+  ni la de un `PATCH` posterior, y un 401/403 en vuelo también lo reinicia.
 
 ## Typecheck
 
