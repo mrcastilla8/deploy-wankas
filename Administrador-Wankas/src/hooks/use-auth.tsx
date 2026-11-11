@@ -2,6 +2,7 @@
 
 import type { UserProfile } from '@/types';
 import { createClient } from '@/lib/supabase/client';
+import { adminCache } from '@/lib/adminCache';
 import { useRouter } from 'next/navigation';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
@@ -14,8 +15,12 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<{ error: AuthError | null }>;
   logout: () => void;
   loading: boolean;
-  updateUser: (updatedData: Partial<UserProfile>) => void;
+  updateUser: (updatedData: DisplayProfileFields) => void;
 }
+
+// Solo datos de presentación. El rol y la sede (`role`, `location_id`) vienen de
+// `profiles` y nunca se modifican desde el cliente.
+type DisplayProfileFields = Partial<Pick<UserProfile, 'name' | 'phone_number' | 'locationName'>>;
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -85,10 +90,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, [supabase]);
 
-  const updateUser = useCallback((updatedData: Partial<UserProfile>) => {
+  const updateUser = useCallback((updatedData: DisplayProfileFields) => {
     setUser(currentUser => {
       if (!currentUser) return null;
-      const newUser = { ...currentUser, ...updatedData };
+      const { name, phone_number, locationName } = updatedData;
+      const newUser = {
+        ...currentUser,
+        ...(name !== undefined && { name }),
+        ...(phone_number !== undefined && { phone_number }),
+        ...(locationName !== undefined && { locationName }),
+      };
       localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
       return newUser;
     });
@@ -144,6 +155,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } finally {
       setUser(null);
       localStorage.removeItem(USER_STORAGE_KEY);
+      // Evita que la siguiente sesión vea datos cacheados de esta.
+      adminCache.invalidateAll();
       router.replace('/');
     }
   }, [supabase, router]);

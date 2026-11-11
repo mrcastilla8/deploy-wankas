@@ -4,69 +4,72 @@
 import * as React from 'react';
 import { useAuth } from '@/hooks/use-auth';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
 import type { Location } from '@/types';
+import { adminRequest, describeAdminError } from '@/lib/adminApi';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Label } from '@/components/ui/label';
-import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
+import { MapPin } from 'lucide-react';
 
+type AssignedLocation = Pick<Location, 'id' | 'name_es' | 'address'>;
 
+type LocationState =
+    | { status: 'loading' }
+    | { status: 'unassigned' }
+    | { status: 'assigned'; location: AssignedLocation }
+    | { status: 'error'; message: string };
+
+/**
+ * REC-05: el trabajador no elige su sede. La sede viene de `profiles.location_id`
+ * (REC-01), la administra un admin (REC-03) y aquí solo se muestra.
+ */
 export default function SelectLocationPage() {
-    const { user, updateUser, loading } = useAuth();
+    const { user, updateUser, logout, loading } = useAuth();
     const router = useRouter();
-    const supabase = createClient();
-    const { toast } = useToast();
-
-    const [locations, setLocations] = React.useState<Location[]>([]);
-    const [selectedLocationId, setSelectedLocationId] = React.useState<string>('');
-    const [isFetching, setIsFetching] = React.useState(true);
+    const [state, setState] = React.useState<LocationState>({ status: 'loading' });
 
     React.useEffect(() => {
-        if (!loading) {
-            if (!user) {
-                router.replace('/');
-            } else if (user.role !== 'worker') {
-                router.replace('/dashboard');
-            } else if (user.location_id) {
-                router.replace('/dashboard/pedidos');
-            }
+        if (loading) return;
+        if (!user) {
+            router.replace('/');
+        } else if (user.role !== 'worker') {
+            router.replace('/dashboard');
         }
     }, [user, loading, router]);
-    
-    React.useEffect(() => {
-        const fetchLocations = async () => {
-            setIsFetching(true);
-            const { data, error } = await supabase.from('locations').select('*').order('name_es');
-            if (error) {
-                toast({ variant: 'destructive', title: 'Error', description: 'No se pudieron cargar las sedes.' });
-            } else {
-                setLocations(data);
-            }
-            setIsFetching(false);
-        };
-        if(user && user.role === 'worker' && !user.location_id) {
-            fetchLocations();
-        }
-    }, [supabase, toast, user]);
-    
-    const handleContinue = () => {
-        if (!selectedLocationId) {
-            toast({ variant: 'destructive', title: 'Error', description: 'Por favor, selecciona una sede.' });
+
+    const assignedLocationId = user?.role === 'worker' ? user.location_id : null;
+
+    const loadAssignedLocation = React.useCallback(async () => {
+        if (!assignedLocationId) {
+            setState({ status: 'unassigned' });
             return;
         }
-        const selectedLocation = locations.find(loc => loc.id === selectedLocationId);
-        if (selectedLocation) {
-            updateUser({ location_id: selectedLocation.id, locationName: selectedLocation.name_es });
-            router.push('/dashboard/pedidos');
+        setState({ status: 'loading' });
+        try {
+            const locations = await adminRequest<AssignedLocation[]>('/api/admin/ubicaciones');
+            const location = locations.find(loc => loc.id === assignedLocationId);
+            setState(location
+                ? { status: 'assigned', location }
+                : { status: 'error', message: 'Tu sede asignada ya no existe. Pide a un administrador que la revise.' });
+        } catch (error) {
+            setState({ status: 'error', message: describeAdminError(error) });
         }
+    }, [assignedLocationId]);
+
+    React.useEffect(() => {
+        if (!loading && user?.role === 'worker') {
+            loadAssignedLocation();
+        }
+    }, [loading, user?.role, loadAssignedLocation]);
+
+    const handleContinue = () => {
+        if (state.status !== 'assigned') return;
+        // Solo se guarda el nombre para mostrarlo; la sede autorizada la decide el servidor.
+        updateUser({ locationName: state.location.name_es });
+        router.push('/dashboard/pedidos');
     };
 
-    const isLoading = loading || isFetching;
-
-    if (isLoading || !user || (user && user.role !== 'worker') || (user && user.location_id)) {
+    if (loading || !user || user.role !== 'worker' || state.status === 'loading') {
         return (
             <div className="flex h-screen items-center justify-center">
                  <div className="w-full max-w-md p-4 space-y-4">
@@ -82,30 +85,41 @@ export default function SelectLocationPage() {
         <main className="flex min-h-screen flex-col items-center justify-center bg-background p-4">
             <Card className="w-full max-w-md">
                 <CardHeader>
-                    <CardTitle className="font-headline text-2xl">Seleccionar Sede</CardTitle>
-                    <CardDescription>Para continuar, elige la sede en la que te encuentras.</CardDescription>
+                    <CardTitle className="font-headline text-2xl">Tu sede de trabajo</CardTitle>
+                    <CardDescription>
+                        {state.status === 'assigned'
+                            ? 'Esta es la sede que tienes asignada. Solo verás los pedidos de esta sede.'
+                            : 'No puedes continuar al panel sin una sede asignada.'}
+                    </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <div className="grid gap-2">
-                        <Label htmlFor="location">Sede de Trabajo</Label>
-                        <Select value={selectedLocationId} onValueChange={setSelectedLocationId}>
-                            <SelectTrigger id="location">
-                                <SelectValue placeholder="Elige una sede..." />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {locations.map(loc => (
-                                    <SelectItem key={loc.id} value={loc.id}>
-                                        {loc.name_es}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    </div>
+                    {state.status === 'assigned' && (
+                        <div className="flex items-start gap-3 rounded-md border p-4">
+                            <MapPin className="mt-0.5 h-5 w-5 text-primary" />
+                            <div>
+                                <p className="font-semibold">{state.location.name_es}</p>
+                                <p className="text-sm text-muted-foreground">{state.location.address}</p>
+                            </div>
+                        </div>
+                    )}
+                    {state.status === 'unassigned' && (
+                        <p className="text-sm text-muted-foreground">
+                            Todavía no tienes una sede asignada. Pide a un administrador que te asigne una
+                            y vuelve a iniciar sesión.
+                        </p>
+                    )}
+                    {state.status === 'error' && (
+                        <p className="text-sm text-destructive">{state.message}</p>
+                    )}
                 </CardContent>
-                <CardFooter>
-                    <Button onClick={handleContinue} className="w-full" disabled={!selectedLocationId}>
-                        Continuar al Panel
-                    </Button>
+                <CardFooter className="flex flex-col gap-2">
+                    {state.status === 'assigned' && (
+                        <Button onClick={handleContinue} className="w-full">Continuar al Panel</Button>
+                    )}
+                    {state.status === 'error' && (
+                        <Button onClick={loadAssignedLocation} className="w-full">Reintentar</Button>
+                    )}
+                    <Button onClick={logout} variant="outline" className="w-full">Cerrar sesión</Button>
                 </CardFooter>
             </Card>
         </main>
