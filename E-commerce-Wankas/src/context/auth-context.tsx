@@ -1,166 +1,148 @@
 'use client';
 
 import type { User } from '@/types';
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { supabase } from '@/lib/supabaseClient'; 
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabaseClient';
 import { clientCache } from '@/lib/clientCache';
+import { AuthRequestGuard } from '@/lib/authRequestGuard';
+import { toast } from '@/hooks/use-toast';
 
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
-  login: (userData: User) => Promise<void>; 
-  logout: () => void;
+  logout: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const PROFILE_FIELDS = 'id, name, email, phone_number, role';
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const requestGuard = useRef(new AuthRequestGuard());
+  const mounted = useRef(false);
+  const lastSessionKey = useRef<string | null>(null);
+  const receivedAuthEvent = useRef(false);
 
-  const fetchUserProfile = async (authUserId: string, authUserEmail?: string | null, authUserName?: string | null): Promise<Partial<User>> => {
-    if (!supabase) {
-      console.warn("Supabase client not available. Cannot fetch user profile.");
-      return { id: authUserId, email: authUserEmail, name: authUserName, phone_number: null };
-    }
-    try {
-      const { data: profileData, error: profileError } = await supabase
-        .from('profiles')
-        .select('id, name, email, phone_number, role') 
-        .eq('id', authUserId)
-        .single();
+  const hydrate = useCallback(async (session: Session | null, event: AuthChangeEvent) => {
+    if (!mounted.current) return;
+    const authUser = session?.user;
+    const sessionKey = authUser ? `${authUser.id}:${session.access_token}` : null;
+    // INITIAL_SESSION and getSession can report the same token. Hydrate it once.
+    if (event === 'INITIAL_SESSION' && sessionKey && sessionKey === lastSessionKey.current) return;
+    if (sessionKey === lastSessionKey.current && event === 'INITIAL_SESSION') return;
+    lastSessionKey.current = sessionKey;
+    const requestGeneration = requestGuard.current.begin();
+    clientCache.invalidateAll();
 
-      if (profileError && profileError.code !== 'PGRST116') { 
-        console.error("Error fetching user profile from Supabase:", profileError.message);
-        return { id: authUserId, email: authUserEmail, name: authUserName, phone_number: null, role: null };
-      }
-      
-      if (profileData) {
-        return {
-          id: profileData.id, 
-          email: profileData.email || authUserEmail,
-          name: profileData.name || authUserName,
-          phone_number: profileData.phone_number,
-          role: profileData.role,
-        };
-      } else {
-        return { id: authUserId, email: authUserEmail, name: authUserName, phone_number: null, role: null };
-      }
-
-    } catch (error) {
-      console.error("Exception while fetching user profile:", error);
-      return { id: authUserId, email: authUserEmail, name: authUserName, phone_number: null };
-    }
-  };
-
-  const buildUser = async (authUser: { id: string; email?: string | null; user_metadata?: any }): Promise<User> => {
-    const profileDetails = await fetchUserProfile(authUser.id, authUser.email, authUser.user_metadata?.name);
-    return {
-      id: authUser.id,
-      email: authUser.email || null,
-      name: profileDetails.name || authUser.user_metadata?.name || null,
-      phone_number: profileDetails.phone_number || null,
-      role: profileDetails.role || null,
-    };
-  };
-
-  useEffect(() => {
-    if (!supabase) {
+    if (!authUser) {
+      setUser(null);
       setIsLoading(false);
       return;
     }
 
-    const initializeAuth = async () => {
-      setIsLoading(true);
+    // Supabase callbacks must remain synchronous. The scheduled task starts after Auth
+    // finishes dispatching the event, so profile reads cannot deadlock token refresh.
+    queueMicrotask(async () => {
       try {
-        // 1. Try native Supabase localStorage session first
-        const { data: { session } } = await supabase.auth.getSession();
-
-        if (session?.user) {
-          const completeUser = await buildUser(session.user);
-          setUser(completeUser);
-          localStorage.setItem('wankas-user', JSON.stringify(completeUser));
-          setIsLoading(false);
-          return;
+        let profile: { id: string; name: string | null; email: string | null; phone_number: string | null; role: string | null } | null = null;
+        if (supabase) {
+          const { data, error } = await supabase.from('profiles').select(PROFILE_FIELDS).eq('id', authUser.id).maybeSingle();
+          if (error) console.error('No se pudo hidratar el perfil del usuario autenticado.');
+          else profile = data;
         }
-        // 2. No session found
-        setUser(null);
-        localStorage.removeItem('wankas-user');
-      } catch (error) {
-        console.error("Failed to initialize auth", error);
-        localStorage.removeItem('wankas-user'); 
-        setUser(null);
+        if (!mounted.current || !requestGuard.current.isCurrent(requestGeneration)) return;
+        setUser({
+          id: authUser.id,
+          email: profile?.email ?? authUser.email ?? null,
+          name: profile?.name ?? (typeof authUser.user_metadata?.name === 'string' ? authUser.user_metadata.name : null),
+          phone_number: profile?.phone_number ?? null,
+          role: profile?.role ?? null,
+        });
+      } catch {
+        // A profile read failure does not invalidate a valid Supabase Auth session.
+        if (mounted.current && requestGuard.current.isCurrent(requestGeneration)) {
+          setUser({
+            id: authUser.id,
+            email: authUser.email ?? null,
+            name: typeof authUser.user_metadata?.name === 'string' ? authUser.user_metadata.name : null,
+            phone_number: null,
+            role: null,
+          });
+        }
+      } finally {
+        if (mounted.current && requestGuard.current.isCurrent(requestGeneration)) setIsLoading(false);
       }
+    });
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    receivedAuthEvent.current = false;
+    try { window.localStorage.removeItem('wankas-user'); } catch { /* Storage may be disabled. */ }
+    if (!supabase) {
       setIsLoading(false);
-    };
+      return () => { mounted.current = false; requestGuard.current.dispose(); };
+    }
 
-    initializeAuth();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      receivedAuthEvent.current = true;
+      // A duplicate initial notification is deduplicated against getSession below.
+      setTimeout(() => { void hydrate(session, event); }, 0);
+    });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
-        const completeUser = await buildUser(session.user);
-        setUser(completeUser);
-        localStorage.setItem('wankas-user', JSON.stringify(completeUser));
-      } else {
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (error) console.error('No se pudo recuperar la sesión de Supabase.');
+      // Do not let a late getSession overwrite an auth event already dispatched.
+      if (mounted.current && !receivedAuthEvent.current) void hydrate(data.session, 'INITIAL_SESSION');
+    }).catch(() => {
+      if (mounted.current && !receivedAuthEvent.current) {
+        requestGuard.current.invalidate();
         setUser(null);
-        localStorage.removeItem('wankas-user');
+        setIsLoading(false);
       }
-      // Invalidar caché del cliente para evitar fuga de estado entre invitados y autenticados
-      clientCache.invalidateAll();
     });
 
     return () => {
-      if (subscription) subscription.unsubscribe();
+      mounted.current = false;
+      requestGuard.current.invalidate();
+      lastSessionKey.current = null;
+      subscription.unsubscribe();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrate]);
+
+  const logout = useCallback(async (): Promise<boolean> => {
+    if (!supabase) {
+      toast({ title: 'No se pudo cerrar sesión', description: 'El servicio de autenticación no está disponible.', variant: 'destructive' });
+      return false;
+    }
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        console.error('No se pudo cerrar la sesión de Supabase.');
+        toast({ title: 'No se pudo cerrar sesión', description: 'Inténtalo de nuevo. Tu sesión sigue activa.', variant: 'destructive' });
+        return false;
+      }
+      requestGuard.current.invalidate();
+      lastSessionKey.current = null;
+      setUser(null);
+      setIsLoading(false);
+      clientCache.invalidateAll();
+      if (typeof window !== 'undefined') window.location.assign('/login');
+      return true;
+    } catch {
+      console.error('No se pudo cerrar la sesión de Supabase.');
+      toast({ title: 'No se pudo cerrar sesión', description: 'Inténtalo de nuevo. Tu sesión sigue activa.', variant: 'destructive' });
+      return false;
+    }
   }, []);
 
-  const login = async (authData: User) => { 
-    setUser(authData);
-    localStorage.setItem('wankas-user', JSON.stringify(authData));
-  };
-
-  const logout = async () => {
-    try {
-      if (supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch (error) {
-      console.warn("Error al cerrar sesión en Supabase:", error);
-    } finally {
-      setUser(null);
-      localStorage.removeItem('wankas-user');
-      clientCache.invalidateAll();
-
-      // Manually clear Supabase localStorage keys to guarantee next page load starts clean
-      if (typeof window !== 'undefined') {
-        const keysToRemove: string[] = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
-            keysToRemove.push(key);
-          }
-        }
-        keysToRemove.forEach(key => localStorage.removeItem(key));
-      }
-
-      if (typeof window !== 'undefined') {
-        window.location.href = '/login'; 
-      }
-    }
-  };
-
-  return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={{ user, isLoading, logout }}>{children}</AuthContext.Provider>;
 };
 
 export const useAuth = (): AuthContextType => {
   const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 };

@@ -2,7 +2,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useAuth } from '@/context/auth-context';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,7 +20,6 @@ export function RegisterForm() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { login } = useAuth();
   const router = useRouter();
   const { toast } = useToast();
   const { translations } = useLocale();
@@ -54,10 +52,7 @@ export function RegisterForm() {
             email,
             password,
             options: {
-                data: {
-                    name,
-                    role: 'user',
-                }
+                data: { name }
             }
         });
 
@@ -67,14 +62,20 @@ export function RegisterForm() {
                 description: error.message,
                 variant: 'destructive',
             });
-        } else if (data.user) {
+        } else if (data.user && data.session) {
             toast({ title: translations.registerForm.registrationSuccessTitle, description: translations.registerForm.registrationSuccessDesc });
             router.push('/profile');
+        } else if (data.user) {
+            toast({
+                title: translations.registerForm.registrationSuccessTitle,
+                description: 'Tu cuenta fue creada. Confirma tu correo electrónico y luego inicia sesión.',
+            });
+            router.push('/login');
         } else {
             toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' });
         }
     } catch (error) {
-        console.error("Registration failed:", error);
+        console.error('No se pudo completar el registro.');
         toast({ title: translations.common.error, description: translations.registerForm.dbErrorDefault, variant: 'destructive' });
     } finally {
         setIsLoading(false);
