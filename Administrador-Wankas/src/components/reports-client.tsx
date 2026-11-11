@@ -8,7 +8,8 @@ import { useAuth } from '@/hooks/use-auth';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, type TooltipProps } from 'recharts';
+import type { NameType, ValueType } from 'recharts/types/component/DefaultTooltipContent';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -34,16 +35,19 @@ const getTimeRange = (range: string): { start: Date, end: Date } => {
     }
 };
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+// jspdf-autotable guarda la posición final de la última tabla en el documento, sin tiparla.
+type JsPdfWithAutoTable = jsPDF & { lastAutoTable: { finalY: number } };
+
+const CustomTooltip = ({ active, payload, label }: TooltipProps<ValueType, NameType>) => {
     if (active && payload && payload.length) {
       return (
         <div className="p-2 bg-background/90 border border-border rounded-lg shadow-lg text-sm">
           <p className="label font-bold mb-1">{label}</p>
-          {payload.map((pld: any, index: number) => (
+          {payload.map((pld, index) => (
             <p key={index} style={{ color: pld.color }} className="flex items-center">
               <span className="mr-2">{pld.name}:</span>
               <span className="font-semibold">
-                {pld.dataKey.toLowerCase().includes('ventas') || pld.dataKey.toLowerCase().includes('ticketpromedio') 
+                {String(pld.dataKey).toLowerCase().includes('ventas') || String(pld.dataKey).toLowerCase().includes('ticketpromedio')
                 ? `S/ ${Number(pld.value).toFixed(2)}` 
                 : pld.value}
               </span>
@@ -88,7 +92,7 @@ export default function ReportsClient() {
         if (ordersError || productsError || locationsError) {
             console.error("Error fetching report data:", ordersError || productsError || locationsError);
         } else {
-            setOrders(ordersData as any);
+            setOrders((ordersData ?? []) as Order[]);
             setProducts(productsData || []);
             setLocations(locationsData || []);
         }
@@ -194,7 +198,7 @@ export default function ReportsClient() {
     }, [products]);
     
     const handleDownloadPdf = () => {
-        const doc = new jsPDF();
+        const doc = new jsPDF() as JsPdfWithAutoTable;
         const timeRangeText = {
             '7d': 'Últimos 7 días',
             '30d': 'Últimos 30 días',
@@ -232,7 +236,7 @@ export default function ReportsClient() {
                 ['Ticket Promedio', `S/ ${salesReportData.averageTicket.toFixed(2)}`],
             ],
         });
-        finalY = (doc as any).lastAutoTable.finalY;
+        finalY = doc.lastAutoTable.finalY;
 
         if (categoryReportData.topCategories.length > 0 || categoryReportData.topProducts.length > 0) {
             doc.setFontSize(14);
@@ -246,7 +250,7 @@ export default function ReportsClient() {
                     head: [['Top 5 Categorías por Ventas', 'Ventas (S/)']],
                     body: categoryReportData.topCategories.map(c => [c.name, `S/ ${c.ventas.toFixed(2)}`]),
                 });
-                finalY = (doc as any).lastAutoTable.finalY;
+                finalY = doc.lastAutoTable.finalY;
             }
 
             if (categoryReportData.topProducts.length > 0) {
@@ -256,7 +260,7 @@ export default function ReportsClient() {
                     body: categoryReportData.topProducts.map(p => [p.name, p.cantidad]),
                     startY: finalY + 10
                 });
-                finalY = (doc as any).lastAutoTable.finalY;
+                finalY = doc.lastAutoTable.finalY;
             }
         }
 
@@ -274,7 +278,7 @@ export default function ReportsClient() {
                     `S/ ${l.ticketPromedio.toFixed(2)}`
                 ]),
             });
-            finalY = (doc as any).lastAutoTable.finalY;
+            finalY = doc.lastAutoTable.finalY;
         }
 
          if (stockReportData.length > 0) {
