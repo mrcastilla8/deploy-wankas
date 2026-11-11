@@ -51,6 +51,7 @@ test('error del servidor: lanza en lugar de devolver una lista vacía', async ()
 
 for (const status of [401, 403]) {
   test(`${status}: invalida toda la caché del panel y marca error de autorización`, async () => {
+    adminCache.setIdentity('auth-error-current:admin:')
     adminCache.set('catalogo', { products: ['de otra sesión'] })
     adminCache.set('ubicaciones', ['de otra sesión'])
     const { fetcher } = fakeFetcher(Response.json({ error: 'FORBIDDEN' }, { status }))
@@ -61,6 +62,32 @@ for (const status of [401, 403]) {
     assert.equal(adminCache.get('ubicaciones'), null)
   })
 }
+
+test('un 401 atrasado de A no invalida la carga ni la caché de B', async () => {
+  adminCache.setIdentity('request-race-a:admin:')
+  let resolveA!: (response: Response) => void
+  const requestA = adminRequest('/api/admin/catalogo', undefined, () =>
+    new Promise<Response>((resolve) => { resolveA = resolve })
+  )
+
+  adminCache.setIdentity('request-race-b:admin:')
+  const generationB = adminCache.getGeneration()
+  adminCache.set('catalogo', ['B'], generationB)
+  let resolveB!: (response: Response) => void
+  const requestB = adminRequest<string[]>('/api/admin/ubicaciones', undefined, () =>
+    new Promise<Response>((resolve) => { resolveB = resolve })
+  )
+
+  resolveA(Response.json({ error: 'UNAUTHORIZED' }, { status: 401 }))
+  const staleError = await rejection(requestA)
+  assert.equal(staleError.status, 401)
+  assert.equal(adminCache.getGeneration(), generationB)
+  assert.deepEqual(adminCache.get('catalogo'), ['B'])
+
+  resolveB(Response.json(['sede-B']))
+  assert.deepEqual(await requestB, ['sede-B'])
+  assert.deepEqual(adminCache.get('catalogo'), ['B'])
+})
 
 test('otros errores no borran la caché ajena', async () => {
   adminCache.set('ubicaciones', ['sede-1'])

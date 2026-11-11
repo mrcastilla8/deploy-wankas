@@ -7,6 +7,7 @@ import autoTable, { type UserOptions } from 'jspdf-autotable';
 import { useAuth } from '@/hooks/use-auth';
 import { adminRequest, describeAdminError } from '@/lib/adminApi';
 import { canExportReport, ReportRequestGate } from '@/lib/reportRequestState';
+import { parseReportPayload, type ReportOrder, type ReportProduct } from '@/lib/reportPayload';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Bar, BarChart, Line, LineChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, type TooltipProps } from 'recharts';
@@ -69,21 +70,6 @@ const renderEmptyState = (message: string, description: string, height: number =
     </div>
 );
 
-type ReportOrder = {
-    id: string;
-    order_date: string;
-    status: string;
-    total_price: number;
-    locations: { name_es: string } | null;
-    order_items: Array<{
-        quantity: number;
-        price_at_purchase: number;
-        products: { name_es: string; categories: { name_es: string } | null } | null;
-    }>;
-};
-type ReportProduct = { id: string; name_es: string; stock: number };
-type ReportPayload = { orders: ReportOrder[]; products: ReportProduct[] };
-
 export default function ReportsClient() {
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
@@ -108,7 +94,8 @@ export default function ReportsClient() {
         setLoadError(null);
         setLoaded(false);
         try {
-            const data = await adminRequest<ReportPayload>('/api/admin/informes');
+            const response = await adminRequest<unknown>('/api/admin/informes');
+            const data = parseReportPayload(response);
             if (!requestGeneration.current.isCurrent(generation)) return;
             setOrders(data.orders);
             setProducts(data.products);

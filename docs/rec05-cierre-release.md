@@ -154,3 +154,17 @@ No hay migraciones REC-05 ni escrituras de datos, por lo que el cambio no requie
 | Pruebas funcionales positivas/negativas en navegador con cuentas aisladas | ⏳ Pendiente: cuentas y entorno aislado no disponibles |
 | Control Vercel que impide promoción automática hasta validar | ❌ **BLOQUEO DE MERGE: CONTROL DE PUBLICACIÓN NO VERIFICADO** |
 | PR #22 Draft, issue #5 abierto, sin merge ni cambios de plataforma | ✅ Estado mantenido |
+
+## Revalidación de carreras y preparación E2E — 11 de noviembre de 2026
+
+Esta revalidación parte del SHA auditado `5eab45140783cfa330a1f8337ae928300890e093`. Los resultados corresponden a la revisión local antes de publicar este seguimiento:
+
+- `adminRequest` captura la generación de identidad antes de la red y solo invalida caché si la identidad original sigue vigente. La prueba con A/B y respuestas diferidas confirma que el 401 atrasado de A no altera la generación ni la caché de B, y que la petición válida de B concluye.
+- `AuthOperationGate` proporciona una vigencia compartida para `getSession`, eventos, login y logout; los eventos vuelven a leer la sesión actual antes de hidratar perfil. Se probaron inicio A obsoleto ante SIGNED_IN B, login pendiente seguido de logout, renovación, sesión nula y desmontaje con dobles.
+- `parseReportPayload` valida en runtime campos requeridos, relaciones y números finitos. Un HTTP 200 JSON incompleto lanza error y no llega al estado de informe cargado.
+- Administración: `npm ci` pasó. TypeScript pasó. `npm test`: 166 pruebas (113 CJS + 53 TS), todas pasaron. ESLint: 0 errores y 5 advertencias existentes. Build Next 15.5.29 pasó con marcadores locales no secretos para URL/keys; el build reporta advertencia de dependencia dinámica de Supabase Realtime.
+- E-commerce: `npm ci` pasó. TypeScript pasó. ESLint: 0 errores y 15 advertencias. Los archivos de test explícitos pasaron 20/20. El comando `node --test tests/` falló en Windows/Node 24.3.0 al interpretar `tests/` como módulo; la ejecución equivalente con los tres archivos enumerados pasó. Build pasó sin variables Supabase de E-commerce, con advertencias de tracing Genkit/handlebars y una dependencia opcional `@opentelemetry/exporter-jaeger` ausente; Genkit se conservó sin actualizar.
+- `npm audit --omit=dev` falló en ambas aplicaciones con 48 vulnerabilidades (22 altas, 25 moderadas, 1 baja, 0 críticas). `npm ci` reportó 71 en el árbol completo (30 altas, 36 moderadas, 4 bajas, 1 crítica), incluyendo dependencias de desarrollo. No se afirma un audit exitoso.
+- No se ejecutó Playwright ni smoke test real. `docs/rec05-e2e-preparacion.md` enumera solo nombres/propósitos/entornos de variables y los procedimientos separados: mutaciones de catálogo interceptadas con fixtures, y smoke solo GET que rechaza escrituras. No se recibió ni inspeccionó secreto alguno; no se tocó Wankas New.
+
+Las advertencias de builds, el audit fallido y la ausencia de sesión aislada para navegador quedan como riesgos/bloqueos de validación, sin modificar producción, Vercel, Supabase, RLS ni SQL.

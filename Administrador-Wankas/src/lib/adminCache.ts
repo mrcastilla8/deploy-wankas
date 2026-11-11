@@ -35,6 +35,14 @@ export const adminCache = {
   getIdentityGeneration(): number { return identityGeneration; },
   isSameIdentityGeneration(requestGeneration: number): boolean { return identityGeneration === requestGeneration; },
 
+  /** Invalida por error de autorización solo si la identidad de la petición sigue activa. */
+  invalidateForIdentityGeneration(requestIdentityGeneration: number): boolean {
+    if (identityGeneration !== requestIdentityGeneration) return false;
+    store.clear();
+    generation += 1;
+    return true;
+  },
+
   get<T>(key: string, ttlMs = DEFAULT_TTL_MS): T | null {
     const entry = store.get(key) as CacheEntry<T> | undefined;
     if (!entry) return null;

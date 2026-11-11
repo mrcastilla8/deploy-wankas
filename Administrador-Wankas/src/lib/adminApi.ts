@@ -48,6 +48,9 @@ export async function adminRequest<T>(
   init?: RequestInit,
   fetcher: AdminFetcher = adminFetch,
 ): Promise<T> {
+  // La generación se captura antes de esperar la red para que un error tardío
+  // de una sesión anterior no pueda invalidar la caché de la identidad actual.
+  const requestIdentityGeneration = adminCache.getIdentityGeneration()
   let response: Response
   try {
     response = await fetcher(path, init)
@@ -57,8 +60,9 @@ export async function adminRequest<T>(
 
   if (!response.ok) {
     const error = new AdminApiError(response.status, await readErrorCode(response))
-    // Un 401/403 invalida todo lo cacheado con la identidad anterior.
-    if (error.isAuthError) adminCache.invalidateAll()
+    // La vista actual recibe el error; la invalidación solo afecta a la sesión
+    // que originó la petición y únicamente si aún sigue activa.
+    if (error.isAuthError) adminCache.invalidateForIdentityGeneration(requestIdentityGeneration)
     throw error
   }
 

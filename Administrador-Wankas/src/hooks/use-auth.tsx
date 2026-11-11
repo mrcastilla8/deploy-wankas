@@ -4,7 +4,8 @@ import type { UserProfile } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 import { adminCache } from '@/lib/adminCache';
 import { useRouter } from 'next/navigation';
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { AuthOperationGate } from '@/lib/authOperationGate';
 
 interface AuthError {
   message: string;
@@ -32,74 +33,88 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
+  const operationGate = useRef(new AuthOperationGate());
+  const explicitAuthIntent = useRef<{ kind: 'login' | 'logout'; operation: number } | null>(null);
+  const authSubjectId = useRef<string | null>(null);
 
   useEffect(() => {
-    let requestId = 0;
-    let observedAuthUserId: string | null = null;
-    let active = true;
+    const gate = operationGate.current;
+    gate.activate();
+    explicitAuthIntent.current = null;
     const clearUser = () => {
       adminCache.setIdentity(null);
       setUser(null);
       localStorage.removeItem(USER_STORAGE_KEY);
     };
-    const hydrate = async (authUserId: string | null, showLoading: boolean) => {
-      const currentRequest = ++requestId;
-      if (observedAuthUserId !== authUserId) {
-        const identityChanged = observedAuthUserId !== null || authUserId === null;
-        observedAuthUserId = authUserId;
-        // Al cambiar el sujeto autenticado se ocultan inmediatamente los datos previos.
-        if (identityChanged) {
-          adminCache.setIdentity(null);
-          setUser(null);
-        }
+    const hydrate = async (authUserId: string | null, operation: number, showLoading: boolean) => {
+      if (!gate.isCurrent(operation)) return;
+      if (authSubjectId.current !== authUserId) {
+        authSubjectId.current = authUserId;
+        clearUser();
       }
       if (showLoading) setLoading(true);
       if (!authUserId) {
         clearUser();
-        if (active && currentRequest === requestId) setLoading(false);
+        if (gate.isCurrent(operation)) setLoading(false);
         return;
       }
       try {
         const { data: profile } = await supabase.from('profiles').select(PROFILE_FIELDS)
           .eq('id', authUserId).single();
-        if (!active || currentRequest !== requestId) return;
-        if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
-          const hydrated = profile as UserProfile;
-          const nextIdentity = `${hydrated.id}:${hydrated.role}:${hydrated.location_id ?? ''}`;
-          adminCache.setIdentity(nextIdentity);
-          setUser(hydrated);
-          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(hydrated));
-        } else {
-          clearUser();
-          supabase.auth.signOut().catch(console.error);
-        }
+        const published = gate.publishIfCurrent(operation, () => {
+          if (profile && (profile.role === 'admin' || profile.role === 'worker')) {
+            const hydrated = profile as UserProfile;
+            const nextIdentity = `${hydrated.id}:${hydrated.role}:${hydrated.location_id ?? ''}`;
+            // No conservar datos previos mientras se resuelve una identidad distinta.
+            adminCache.setIdentity(nextIdentity);
+            setUser(hydrated);
+            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(hydrated));
+          } else {
+            clearUser();
+            void supabase.auth.signOut().catch(console.error);
+          }
+        });
+        if (!published) return;
       } catch (error) {
-        if (!active || currentRequest !== requestId) return;
-        console.error('Failed to hydrate user profile', error);
-        clearUser();
+        if (!gate.publishIfCurrent(operation, () => {
+          console.error('Failed to hydrate user profile', error);
+          clearUser();
+        })) return;
       } finally {
-        if (active && currentRequest === requestId) setLoading(false);
+        if (gate.isCurrent(operation)) setLoading(false);
       }
     };
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      // Do not await Supabase work from inside its auth event callback.
-      queueMicrotask(() => { void hydrate(session?.user.id ?? null, false); });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+      // Login/logout explícitos ya tienen una operación vigente propia. Los
+      // eventos de esas operaciones no deben competir con su resolución.
+      if (explicitAuthIntent.current) return;
+      const operation = gate.begin();
+      // El evento puede quedar encolado respecto de otro cambio de sesión;
+      // leer la sesión actual evita hidratar el user del payload obsoleto.
+      queueMicrotask(() => {
+        void supabase.auth.getSession().then(({ data: { session } }) => {
+          if (gate.isCurrent(operation)) void hydrate(session?.user.id ?? null, operation, false);
+        }).catch((error: unknown) => {
+          if (!gate.isCurrent(operation)) return;
+          console.error('Failed to refresh auth session', error);
+          clearUser();
+          setLoading(false);
+        });
+      });
     });
+    const initialOperation = gate.begin();
     void supabase.auth.getSession().then(({ data: { session } }) => {
-      if (active) void hydrate(session?.user.id ?? null, true);
+      if (gate.isCurrent(initialOperation)) void hydrate(session?.user.id ?? null, initialOperation, true);
     }).catch((error: unknown) => {
-      if (!active) return;
-      requestId += 1;
-      observedAuthUserId = null;
+      if (!gate.isCurrent(initialOperation)) return;
       console.error('Failed to read auth session', error);
       clearUser();
       setLoading(false);
     });
 
     return () => {
-      active = false;
-      requestId += 1;
+      gate.deactivate();
       if (subscription) subscription.unsubscribe();
     };
   }, [supabase]);
@@ -120,59 +135,74 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   const login = useCallback(async (email: string, password: string): Promise<{ error: AuthError | null }> => {
-    const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+    const gate = operationGate.current;
+    const operation = gate.begin();
+    explicitAuthIntent.current = { kind: 'login', operation };
+    authSubjectId.current = null;
+    adminCache.setIdentity(null);
+    setUser(null);
+    localStorage.removeItem(USER_STORAGE_KEY);
+    setLoading(true);
+    try {
+      const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+      if (!gate.isCurrent(operation)) return { error: null };
+      if (authError) {
+        return { error: { message: authError.message === 'Invalid login credentials' ? 'Credenciales inválidas.' : authError.message } };
+      }
+      if (!data.user) return { error: { message: 'Error de autenticación desconocido.' } };
 
-    if (authError) {
-      return { error: { message: authError.message === 'Invalid login credentials' ? "Credenciales inválidas." : authError.message } };
-    }
-
-    if (data.user) {
-      const { data: profile, error: dbError } = await supabase
-        .from('profiles')
-        .select(PROFILE_FIELDS)
-        .eq('id', data.user.id)
-        .single();
-
+      const { data: profile, error: dbError } = await supabase.from('profiles').select(PROFILE_FIELDS)
+        .eq('id', data.user.id).single();
+      if (!gate.isCurrent(operation)) return { error: null };
       if (dbError || !profile) {
         await supabase.auth.signOut();
-        return { error: { message: "No se encontró el perfil de usuario." } };
+        if (!gate.isCurrent(operation)) return { error: null };
+        return { error: { message: 'No se encontró el perfil de usuario.' } };
       }
-
       if (profile.role !== 'admin' && profile.role !== 'worker') {
         await supabase.auth.signOut();
-        return { error: { message: "Privilegios insuficientes para acceder al administrador." } };
+        if (!gate.isCurrent(operation)) return { error: null };
+        return { error: { message: 'Privilegios insuficientes para acceder al administrador.' } };
       }
 
       const userProfile = profile as UserProfile;
+      authSubjectId.current = userProfile.id;
       adminCache.setIdentity(`${userProfile.id}:${userProfile.role}:${userProfile.location_id ?? ''}`);
       setUser(userProfile);
       localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userProfile));
-
-
-
-      if (userProfile.role === 'worker') {
-        router.replace('/seleccionar-sede');
-      } else {
-        router.replace('/dashboard');
-      }
-
+      if (userProfile.role === 'worker') router.replace('/seleccionar-sede');
+      else router.replace('/dashboard');
       return { error: null };
+    } catch {
+      if (!gate.isCurrent(operation)) return { error: null };
+      return { error: { message: 'No se pudo completar el inicio de sesión. Inténtalo de nuevo.' } };
+    } finally {
+      if (gate.isCurrent(operation)) {
+        explicitAuthIntent.current = null;
+        setLoading(false);
+      }
     }
-
-    return { error: { message: "Error de autenticación desconocido." } };
   }, [supabase, router]);
 
   const logout = useCallback(async () => {
+    const gate = operationGate.current;
+    const operation = gate.begin();
+    explicitAuthIntent.current = { kind: 'logout', operation };
+    authSubjectId.current = null;
+    adminCache.setIdentity(null);
+    setUser(null);
+    localStorage.removeItem(USER_STORAGE_KEY);
+    setLoading(false);
     try {
       await supabase.auth.signOut();
     } catch (error) {
       console.warn("Supabase signOut error:", error);
     } finally {
-      setUser(null);
-      localStorage.removeItem(USER_STORAGE_KEY);
-      // Evita que la siguiente sesión vea datos cacheados de esta.
-      adminCache.invalidateAll();
-      router.replace('/');
+      if (gate.isCurrent(operation)) {
+        setUser(null);
+        explicitAuthIntent.current = null;
+        router.replace('/');
+      }
     }
   }, [supabase, router]);
   
