@@ -2,63 +2,81 @@
 "use client"
 
 import * as React from "react"
+import { useRouter } from "next/navigation"
 import { useAuth } from "@/hooks/use-auth"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { adminRequest, describeAdminError } from "@/lib/adminApi"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Loader } from "@/components/ui/loader"
 import type { Order, OrderStatus } from "@/types"
 import { orderStatusToSpanish } from "@/types"
 import { ShoppingCart, Package, MapPin, DollarSign } from "lucide-react"
 
+// Proyección que devuelve GET /api/admin/dashboard (REC-03), solo para admin.
+type DashboardPayload = {
+  stats: { totalOrders: number; totalRevenue: number; activeProducts: number; activeLocations: number }
+  recentOrders: Array<Pick<Order, 'id' | 'total_price' | 'status'> & {
+    profiles: { name: string | null } | null
+    locations: { name_es: string } | null
+  }>
+}
+
 export default function DashboardPage() {
   const { user } = useAuth()
-  const [stats, setStats] = React.useState({
-    totalOrders: 0,
-    totalRevenue: 0,
-    activeProducts: 0,
-    activeLocations: 0,
-  })
-  const [recentOrders, setRecentOrders] = React.useState<Order[]>([])
+  const router = useRouter()
+  const [data, setData] = React.useState<DashboardPayload | null>(null)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(true)
+
+  const isAdmin = user?.role === 'admin'
+
+  const fetchDashboardData = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      setData(await adminRequest<DashboardPayload>('/api/admin/dashboard'))
+      setLoadError(null)
+    } catch (error) {
+      setData(null)
+      setLoadError(describeAdminError(error))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   React.useEffect(() => {
     // No hacer nada hasta que el usuario esté autenticado
     if (!user) return
-
-    const fetchDashboardData = async () => {
-      setLoading(true)
-      try {
-        const res = await fetch('/api/admin/dashboard')
-        const data = await res.json()
-        setStats(data.stats)
-        setRecentOrders(data.recentOrders)
-      } catch (e) {
-        console.error('Error fetching dashboard data:', e)
-      } finally {
-        setLoading(false)
-      }
+    // El resumen es solo para administradores; el trabajador trabaja desde sus pedidos.
+    if (!isAdmin) {
+      router.replace('/dashboard/pedidos')
+      return
     }
-
     fetchDashboardData()
+  }, [user, isAdmin, router, fetchDashboardData])
 
-    // Prefetch silencioso: alimentar Redis con todos los datos antes de que el
-    // admin navegue a esas pestañas, para que carguen altoque.
-    const prefetchAll = () => {
-      fetch('/api/admin/catalogo').catch(() => {})
-      fetch('/api/admin/usuarios').catch(() => {})
-      fetch('/api/admin/ubicaciones').catch(() => {})
-      const params = new URLSearchParams({ role: user.role })
-      if (user.role === 'worker' && user.location_id) {
-        params.set('location_id', user.location_id)
-      }
-      fetch(`/api/admin/pedidos?${params}`).catch(() => {})
-    }
+  if (!isAdmin || loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
+        <Loader text="Cargando panel..." size={48} />
+      </div>
+    )
+  }
 
-    // Ejecutar prefetch 1 segundo después de que el dashboard carga para
-    // no competir con la propia petición del panel
-    const timer = setTimeout(prefetchAll, 1000)
-    return () => clearTimeout(timer)
-  }, [user])
+  if (loadError || !data) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>No se pudo cargar el resumen</CardTitle>
+          <CardDescription>{loadError ?? 'No se recibieron datos del servidor.'}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={fetchDashboardData}>Reintentar</Button>
+        </CardContent>
+      </Card>
+    )
+  }
 
+  const { stats, recentOrders } = data
   const statCards = [
     {
       title: "Total Pedidos",
@@ -85,14 +103,6 @@ export default function DashboardPage() {
       description: "Sucursales operativas",
     },
   ]
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[calc(100vh-15rem)]">
-        <Loader text="Cargando panel..." size={48} />
-      </div>
-    )
-  }
 
   return (
     <div className="space-y-8">
